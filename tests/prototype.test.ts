@@ -159,6 +159,87 @@ describe('submitUserTurn', () => {
     ])
   })
 
+  it('supports the cafe to sandwich demo flow without drifting', () => {
+    const icedState = submitUserTurn(initialConversation, 'a mi me da un café iced')
+    expect(getNewMessages(icedState)).toEqual([
+      {
+        speaker: 'User',
+        target: 'Cookie',
+        text: 'a mi me da un café iced',
+      },
+      {
+        speaker: 'Cookie',
+        target: undefined,
+        text: 'You\'re close. Instead of "iced", say: "A mí me da un café con hielo."',
+      },
+    ])
+
+    const orderState = submitUserTurn(icedState, 'a mi me da un café con hielo porfa')
+    expect(getNewMessages(orderState, icedState.messages.length)).toEqual([
+      {
+        speaker: 'User',
+        target: 'Cream',
+        text: 'a mi me da un café con hielo porfa',
+      },
+      {
+        speaker: 'Cream',
+        target: undefined,
+        text: 'Claro. ¿Quieres algo más?',
+      },
+    ])
+
+    const sandwichState = submitUserTurn(
+      orderState,
+      'Gracias. I want to add sandwich. How do I say sandwich again?',
+    )
+    expect(getNewMessages(sandwichState, orderState.messages.length)).toEqual([
+      {
+        speaker: 'User',
+        target: 'Cookie',
+        text: 'Gracias. I want to add sandwich. How do I say sandwich again?',
+      },
+      {
+        speaker: 'Cookie',
+        target: undefined,
+        text: 'sandwich = sándwich. Example: Quisiera añadir un sándwich, por favor.',
+      },
+    ])
+
+    const restartState = submitUserTurn(sandwichState, 'Hola Buenos días.', {
+      scenarioId: 'cafe-order',
+    })
+    expect(getNewMessages(restartState, sandwichState.messages.length)).toEqual([
+      {
+        speaker: 'User',
+        target: 'Cream',
+        text: 'Hola Buenos días.',
+      },
+      {
+        speaker: 'Cream',
+        target: undefined,
+        text: 'Hola, buenos días. ¿Qué quieres pedir?',
+      },
+    ])
+  })
+
+  it('does not fall back to the cafe opener after a clear chat greeting', () => {
+    const nextState = submitUserTurn(initialConversation, 'Hola Buenos días.')
+
+    expect(nextState.phase).toBe('normal')
+    expect(getNewMessages(nextState)).toEqual([
+      {
+        speaker: 'User',
+        target: 'Cream',
+        text: 'Hola Buenos días.',
+      },
+      {
+        speaker: 'Cream',
+        target: undefined,
+        text: 'Hola, buenos días. ¿Cómo estás?',
+      },
+    ])
+  })
+
   it('does not append or route empty input', () => {
     const nextState = submitUserTurn(initialConversation, '   ')
 

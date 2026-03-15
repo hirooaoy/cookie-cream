@@ -190,4 +190,76 @@ describe('buildSessionRecapPresentation', () => {
       },
     ])
   })
+
+  it('falls back to coached phrase vocabulary when structured vocab is missing', () => {
+    const messages: Message[] = [
+      {
+        id: 'user-1',
+        speaker: 'User',
+        text: 'A mí me da un café iced.',
+      },
+      {
+        id: 'cookie-2',
+        speaker: 'Cookie',
+        text: 'You\'re close. "iced" is "helado" in Spanish. Say: "A mí me da un café con hielo."',
+      },
+    ]
+
+    const presentation = buildSessionRecapPresentation(
+      {
+        didWell: [
+          'You kept the order moving in Spanish.',
+          'You retried after feedback instead of stopping.',
+          'You stayed specific about what you wanted.',
+        ],
+        betterWay: 'Instead of mixing in "iced", try: "A mí me da un café con hielo."',
+        tryNext: 'Practice ordering another cold drink in Spanish.',
+      },
+      messages,
+    )
+
+    expect(presentation.vocabulary).toEqual([
+      {
+        term: 'café',
+        translation: 'coffee',
+      },
+      {
+        term: 'hielo',
+        translation: 'ice',
+      },
+    ])
+  })
+
+  it('extracts inline sandwich vocabulary from Cookie teaching text', () => {
+    const messages: Message[] = [
+      {
+        id: 'user-1',
+        speaker: 'User',
+        text: 'Gracias. I want to add sandwich. How do I say sandwich again?',
+      },
+      {
+        id: 'cookie-2',
+        speaker: 'Cookie',
+        text: 'sandwich = sándwich. Example: Quisiera añadir un sándwich, por favor.',
+      },
+    ]
+
+    const presentation = buildSessionRecapPresentation(
+      {
+        didWell: [
+          'You stayed engaged in the cafe conversation.',
+          'You asked for the missing word instead of stopping.',
+          'You kept building the order in Spanish.',
+        ],
+        betterWay: 'Try combining your coffee and sandwich request in one sentence.',
+        tryNext: 'Practice ordering the drink and the sandwich together in Spanish.',
+      },
+      messages,
+    )
+
+    expect(presentation.vocabulary).toContainEqual({
+      term: 'sándwich',
+      translation: 'sandwich',
+    })
+  })
 })

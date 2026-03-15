@@ -1,7 +1,8 @@
 import { createAdaptiveCookieReply } from './cookieCoach.js'
+import { getScriptedTurnDecision, type ScriptedTurnDecision } from './demoScript.js'
 import { buildLocalVocabularyEntries, type VocabularyEntry } from './vocabulary.js'
 
-export type Speaker = 'Cream' | 'Cookie' | 'User'
+export type Speaker = 'Cream' | 'Cookie' | 'User' | 'System'
 export type Phase = 'normal' | 'retry-after-cookie'
 export type UserTarget = 'Cream' | 'Cookie'
 
@@ -16,6 +17,10 @@ export type Message = {
 export type ConversationState = {
   messages: Message[]
   phase: Phase
+}
+
+type SubmitTurnOptions = {
+  scenarioId?: string | null
 }
 
 const allowedProperNouns = [
@@ -154,6 +159,7 @@ export function shouldRouteToCookie(text: string): boolean {
 export function submitUserTurn(
   state: ConversationState,
   rawText: string,
+  options: SubmitTurnOptions = {},
 ): ConversationState {
   const text = rawText.trim()
 
@@ -162,13 +168,27 @@ export function submitUserTurn(
   }
 
   if (state.phase === 'retry-after-cookie') {
-    return resolveRetryTurn(state, text)
+    return resolveRetryTurn(state, text, options)
   }
 
-  return resolveNormalTurn(state, text)
+  return resolveNormalTurn(state, text, options)
 }
 
-function resolveNormalTurn(state: ConversationState, text: string): ConversationState {
+function resolveNormalTurn(
+  state: ConversationState,
+  text: string,
+  options: SubmitTurnOptions,
+): ConversationState {
+  const scriptedDecision = getScriptedTurnDecision({
+    transcript: text,
+    phase: state.phase,
+    scenarioId: options.scenarioId,
+  })
+
+  if (scriptedDecision) {
+    return applyScriptedTurnDecision(state, text, scriptedDecision)
+  }
+
   if (shouldRouteToCookie(text)) {
     const userMessage = createUserMessage(state.messages.length + 1, text, 'Cookie')
     const cookieMessageContent = getCookieMessageContent(text)
@@ -193,7 +213,21 @@ function resolveNormalTurn(state: ConversationState, text: string): Conversation
   }
 }
 
-function resolveRetryTurn(state: ConversationState, text: string): ConversationState {
+function resolveRetryTurn(
+  state: ConversationState,
+  text: string,
+  options: SubmitTurnOptions,
+): ConversationState {
+  const scriptedDecision = getScriptedTurnDecision({
+    transcript: text,
+    phase: state.phase,
+    scenarioId: options.scenarioId,
+  })
+
+  if (scriptedDecision) {
+    return applyScriptedTurnDecision(state, text, scriptedDecision)
+  }
+
   if (isSuccessfulRetry(text)) {
     const userMessage = createUserMessage(state.messages.length + 1, text, 'Cream')
     const creamMessage = createCreamMessage(state.messages.length + 2, getCreamText(text))
@@ -248,6 +282,40 @@ function createCreamMessage(idNumber: number, text: string): Message {
   }
 }
 
+function applyScriptedTurnDecision(
+  state: ConversationState,
+  text: string,
+  decision: ScriptedTurnDecision,
+): ConversationState {
+  const userMessage = createUserMessage(state.messages.length + 1, text, decision.route)
+
+  if (decision.route === 'Cookie') {
+    const fallbackVocabulary = buildLocalVocabularyEntries({
+      transcript: text,
+      betterSpanishPhrasing: decision.betterSpanishPhrasing,
+      reply: decision.reply,
+      maxEntries: 2,
+    })
+    const cookieMessage = createCookieMessage(
+      state.messages.length + 2,
+      decision.reply,
+      decision.vocabulary ?? (fallbackVocabulary.length > 0 ? fallbackVocabulary : undefined),
+    )
+
+    return {
+      messages: [...state.messages, userMessage, cookieMessage],
+      phase: 'retry-after-cookie',
+    }
+  }
+
+  const creamMessage = createCreamMessage(state.messages.length + 2, decision.reply)
+
+  return {
+    messages: [...state.messages, userMessage, creamMessage],
+    phase: 'normal',
+  }
+}
+
 function getCookieMessageContent(text: string): { text: string; vocabulary?: VocabularyEntry[] } {
   let betterSpanishPhrasing: string | undefined
 
@@ -277,11 +345,27 @@ function getCookieMessageContent(text: string): { text: string; vocabulary?: Voc
 }
 
 function getCreamText(text: string): string {
+  if (isFreshGreeting(text)) {
+    return 'Hola, buenos días. ¿Cómo estás?'
+  }
+
   if (text === 'Hoy hizo mucho calor.') {
     return 'Ah, sí. ¿Qué hiciste después?'
   }
 
   return 'Entiendo. Cuéntame un poco más.'
+}
+
+function isFreshGreeting(text: string): boolean {
+  const normalizedText = text
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLocaleLowerCase()
+    .replace(/[^a-z0-9'\s]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+
+  return normalizedText === 'hola buenos dias' || normalizedText.startsWith('hola buenos dias ')
 }
 
 function stripAllowedProperNouns(text: string): string {

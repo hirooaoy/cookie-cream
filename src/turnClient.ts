@@ -19,8 +19,9 @@ export type TurnSubmissionResult = {
 export async function submitTurnWithFallback(
   conversation: ConversationState,
   transcript: string,
+  scenarioId: string | null,
 ): Promise<TurnSubmissionResult> {
-  const request = buildTurnRequest(conversation, transcript)
+  const request = buildTurnRequest(conversation, transcript, scenarioId)
 
   try {
     const response = await submitTurnRequest(request)
@@ -34,11 +35,16 @@ export async function submitTurnWithFallback(
   }
 }
 
-function buildTurnRequest(conversation: ConversationState, transcript: string): TurnRequest {
+function buildTurnRequest(
+  conversation: ConversationState,
+  transcript: string,
+  scenarioId: string | null,
+): TurnRequest {
   return {
     transcript,
     phase: conversation.phase,
     recentMessages: conversation.messages,
+    scenarioId,
     learnerLanguage,
     targetLanguage,
   }
@@ -135,7 +141,7 @@ function isPhase(value: unknown): value is Phase {
 }
 
 function isSpeaker(value: unknown): value is Message['speaker'] {
-  return value === 'Cream' || value === 'Cookie' || value === 'User'
+  return value === 'Cream' || value === 'Cookie' || value === 'User' || value === 'System'
 }
 
 function isRoute(value: unknown): value is TurnMeta['route'] {

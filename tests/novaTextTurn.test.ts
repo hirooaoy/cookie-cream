@@ -64,6 +64,58 @@ describe('novaTextTurn helpers', () => {
     ).toBe('You stayed in English there. Try: "Quiero un café con leche y un muffin."')
   })
 
+  it('uses the scripted sandwich coaching reply for the demo turn', () => {
+    expect(
+      __testables.createAssistantReply(
+        {
+          ...baseRequest,
+          transcript: 'Gracias. I want to add sandwich. How do I say sandwich again?',
+        },
+        {
+          route: 'Cookie',
+          betterSpanishPhrasing: 'Quisiera añadir un sándwich, por favor.',
+          reply: 'Model wording that should not leak through.',
+        },
+      ),
+    ).toBe(
+      'sandwich = sándwich. Example: Quisiera añadir un sándwich, por favor.',
+    )
+  })
+
+  it('uses the scripted greeting restart for Cream', () => {
+    expect(
+      __testables.createAssistantReply(
+        {
+          ...baseRequest,
+          phase: 'retry-after-cookie',
+          scenarioId: 'cafe-order',
+          transcript: 'Hola Buenos días.',
+        },
+        {
+          route: 'Cream',
+          reply: 'Model wording that should not leak through.',
+        },
+      ),
+    ).toBe('Hola, buenos días. ¿Qué quieres pedir?')
+  })
+
+  it('does not force the cafe greeting after a reset with no active scenario', () => {
+    expect(
+      __testables.createAssistantReply(
+        {
+          ...baseRequest,
+          phase: 'retry-after-cookie',
+          scenarioId: null,
+          transcript: 'Hola Buenos días.',
+        },
+        {
+          route: 'Cream',
+          reply: 'Hola, buenos días. ¿Cómo estás?',
+        },
+      ),
+    ).toBe('Hola, buenos días. ¿Cómo estás?')
+  })
+
   it('marks Cream as invalid when the transcript still contains English', () => {
     const validation = __testables.validateDecision(baseRequest, {
       route: 'Cream',

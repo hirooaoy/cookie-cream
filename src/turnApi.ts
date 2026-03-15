@@ -4,6 +4,7 @@ export type TurnRequest = {
   transcript: string
   phase: Phase
   recentMessages: Message[]
+  scenarioId?: string | null
   learnerLanguage: string
   targetLanguage: string
 }
@@ -27,7 +28,9 @@ export function resolveLocalTurnRequest(request: TurnRequest): TurnResponse {
     messages: request.recentMessages,
     phase: request.phase,
   }
-  const nextState = submitUserTurn(currentState, request.transcript)
+  const nextState = submitUserTurn(currentState, request.transcript, {
+    scenarioId: request.scenarioId,
+  })
   const newMessages = nextState.messages.slice(request.recentMessages.length)
 
   return {

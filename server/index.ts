@@ -1,8 +1,11 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { getServerConfig } from './config.js'
+import { streamAssistantAudio } from './assistantAudioService.js'
+import { attachLiveSonicRouter } from './liveSonicRouter.js'
 import { resolveServerRecap } from './recapService.js'
 import { resolveServerTranslation } from './translationService.js'
 import { resolveServerTurn } from './turnService.js'
+import type { AssistantAudioRequest } from '../src/assistantAudioApi.js'
 import type { SessionRecapRequest } from '../src/recapApi.js'
 import type { TranslationRequest } from '../src/translationApi.js'
 import type { TurnRequest } from '../src/turnApi.js'
@@ -11,7 +14,7 @@ const serverConfig = getServerConfig()
 const supportedMethods = 'POST, OPTIONS'
 const allowedHeaders = 'Content-Type'
 
-createServer(async (request, response) => {
+const server = createServer(async (request, response) => {
   applyCommonHeaders(response)
 
   if (!request.url) {
@@ -21,7 +24,13 @@ createServer(async (request, response) => {
 
   const { pathname } = new URL(request.url, `http://${request.headers.host ?? 'localhost'}`)
 
-  if ((pathname === '/api/turn' || pathname === '/api/recap' || pathname === '/api/translate') && request.method === 'OPTIONS') {
+  if (
+    (pathname === '/api/turn' ||
+      pathname === '/api/recap' ||
+      pathname === '/api/translate' ||
+      pathname === '/api/assistant-audio') &&
+    request.method === 'OPTIONS'
+  ) {
     response.writeHead(204)
     response.end()
     return
@@ -42,8 +51,17 @@ createServer(async (request, response) => {
     return
   }
 
+  if (pathname === '/api/assistant-audio' && request.method === 'POST') {
+    await handleAssistantAudioRequest(request, response)
+    return
+  }
+
   sendJson(response, 404, { error: 'Not found.' })
-}).listen(serverConfig.port, () => {
+})
+
+attachLiveSonicRouter(server, serverConfig.nova)
+
+server.listen(serverConfig.port, () => {
   console.log(`Cookie & Cream API listening on http://localhost:${serverConfig.port}`)
 })
 
@@ -125,6 +143,32 @@ async function handleTranslationRequest(request: IncomingMessage, response: Serv
   sendJson(response, 200, await resolveServerTranslation(requestBody, serverConfig))
 }
 
+async function handleAssistantAudioRequest(request: IncomingMessage, response: ServerResponse): Promise<void> {
+  let requestBody: unknown
+
+  try {
+    requestBody = await readJsonBody(request)
+  } catch {
+    sendJson(response, 400, { error: 'Request body must be valid JSON.' })
+    return
+  }
+
+  if (!isAssistantAudioRequest(requestBody)) {
+    sendJson(response, 400, {
+      error: 'Invalid assistant audio request payload.',
+      expected: {
+        text: 'string',
+        speaker: "'Cookie' | 'Cream'",
+        learnerLanguage: 'string',
+        targetLanguage: 'string',
+      },
+    })
+    return
+  }
+
+  await streamAssistantAudio(requestBody, response, serverConfig.nova)
+}
+
 function applyCommonHeaders(response: ServerResponse): void {
   response.setHeader('Access-Control-Allow-Origin', '*')
   response.setHeader('Access-Control-Allow-Methods', supportedMethods)
@@ -171,6 +215,7 @@ function isTurnRequest(value: unknown): value is TurnRequest {
     isPhase(value.phase) &&
     Array.isArray(value.recentMessages) &&
     value.recentMessages.every(isMessage) &&
+    (value.scenarioId === undefined || value.scenarioId === null || typeof value.scenarioId === 'string') &&
     typeof value.learnerLanguage === 'string' &&
     typeof value.targetLanguage === 'string'
   )
@@ -190,6 +235,19 @@ function isSessionRecapRequest(value: unknown): value is SessionRecapRequest {
 }
 
 function isTranslationRequest(value: unknown): value is TranslationRequest {
+  if (!isRecord(value)) {
+    return false
+  }
+
+  return (
+    typeof value.text === 'string' &&
+    isAgentSpeaker(value.speaker) &&
+    typeof value.learnerLanguage === 'string' &&
+    typeof value.targetLanguage === 'string'
+  )
+}
+
+function isAssistantAudioRequest(value: unknown): value is AssistantAudioRequest {
   if (!isRecord(value)) {
     return false
   }
@@ -224,7 +282,7 @@ function isPhase(value: unknown): value is TurnRequest['phase'] {
 }
 
 function isSpeaker(value: unknown): boolean {
-  return value === 'Cream' || value === 'Cookie' || value === 'User'
+  return value === 'Cream' || value === 'Cookie' || value === 'User' || value === 'System'
 }
 
 function isAgentSpeaker(value: unknown): value is TranslationRequest['speaker'] {

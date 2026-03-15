@@ -1,8 +1,10 @@
 import {
   useEffect,
   useId,
+  useLayoutEffect,
   useRef,
   useState,
+  type CSSProperties,
   type ChangeEvent,
   type FormEvent,
   type KeyboardEvent as ReactKeyboardEvent,
@@ -12,8 +14,18 @@ import {
 import { createPortal } from 'react-dom'
 import CookieAvatar from './assets/Cookie.png'
 import CreamAvatar from './assets/Cream.png'
-import CafeMenuScene from './assets/CafeMenuScene.svg'
-import { getBubbleTextSegments, getInlineQuoteTextSegments } from './messageText'
+import CafeCreamBackdrop from './assets/CafeCreamBackdrop.png'
+import { WhisperBubble, WhisperBubbleLoading } from './components/WhisperBubble'
+import { LiveAssistantAudioPlayer } from './live/liveAssistantAudioPlayer'
+import {
+  formatLiveTranscriptForComposer,
+  formatWhisperSpeechText,
+  getLiveHelperText,
+  inferOptimisticWhisperHint,
+} from './live/liveHelpers'
+import type { PracticeMode, WhisperHint } from './live/liveTypes'
+import { useLivePractice } from './live/useLivePractice'
+import { getBubbleTextSegments, getInlineQuoteTextSegments, getSpeechTextSegments } from './messageText'
 import { initialConversation, type ConversationState, type Message, type Speaker } from './prototype'
 import {
   createSpeechRecognition,
@@ -25,12 +37,13 @@ import {
 import { fetchSessionRecapWithFallback } from './recapClient'
 import type { SessionRecap } from './recapApi'
 import { buildSessionRecapPresentation } from './recapPresentation'
+import { clearSessionMessages, loadSessionMessages, saveSessionMessages } from './sessionHistory'
 import { submitTurnWithFallback } from './turnClient'
 import type { TurnMeta } from './turnApi'
 import { translateMessageWithFallback } from './translationClient'
 import { selectPreferredVoice } from './voiceSelection'
 
-type PartnerSpeaker = Exclude<Speaker, 'User'>
+type PartnerSpeaker = Exclude<Speaker, 'User' | 'System'>
 type ScenarioStarter = {
   id: string
   label: string
@@ -40,6 +53,11 @@ type MessageTranslationState = {
   isLoading: boolean
   isVisible: boolean
   text?: string
+}
+type CallPanelView = {
+  role: string
+  showCafeBackdrop: boolean
+  speaker: PartnerSpeaker
 }
 type DropdownOption = {
   value: string
@@ -60,6 +78,10 @@ type FloatingPanelStyle = {
   maxHeight: number
   top?: number
   width: number
+}
+type RecoverableWhisperBubble = {
+  hint: WhisperHint
+  isVisible: boolean
 }
 
 const avatarBySpeaker: Record<PartnerSpeaker, string> = {
@@ -95,6 +117,9 @@ const rotatingQuotes = [
 
 const amazonNovaUrl = 'https://aws.amazon.com/nova/'
 const amazonBedrockUrl = 'https://aws.amazon.com/bedrock/'
+const defaultTranscriptBottomClearance = 162
+const baseInputDockHeight = 76
+const liveWhisperMinimumLoadingMs = 700
 const practiceLanguageOptions: DropdownOption[] = [
   {
     value: 'Spanish',
@@ -122,6 +147,14 @@ const nativeLanguageOptions: DropdownOption[] = [
   },
 ]
 
+// Reader note:
+// This file intentionally owns more UI orchestration than a long-term product should.
+// During the hackathon, the live experience changed fastest at the seams between
+// transcript rendering, whisper timing, assistant audio, and submit gating. Keeping
+// those interactions close together made it easier to debug real demo regressions and
+// ship a believable voice loop quickly. If this grows past hackathon scope, the first
+// extraction targets should be live dock state, audio playback coordination, and the
+// call panel animation state.
 function LanguageDropdown({ label, onChange, options, value }: LanguageDropdownProps) {
   const interactiveOptions = options.filter((option) => !option.disabled)
   const staticOptions = options.filter((option) => option.disabled)
@@ -492,7 +525,10 @@ function App() {
   const [hasStarted, setHasStarted] = useState(false)
   const [learningLanguage, setLearningLanguage] = useState('Spanish')
   const [fluentLanguage, setFluentLanguage] = useState('English')
+  const practiceMode: PracticeMode = 'live'
   const [conversation, setConversation] = useState<ConversationState>(initialConversation)
+  const [sessionMessages, setSessionMessages] = useState<Message[]>(() => loadSessionMessages())
+  const sessionMessagesRef = useRef<Message[]>(sessionMessages)
   const [draft, setDraft] = useState('')
   const [isListening, setIsListening] = useState(false)
   const [selectedStarterId, setSelectedStarterId] = useState<string | null>(null)
@@ -505,34 +541,170 @@ function App() {
   const [isRecapModalOpen, setIsRecapModalOpen] = useState(false)
   const [messageTranslations, setMessageTranslations] = useState<Record<string, MessageTranslationState>>({})
   const [speakingSpeaker, setSpeakingSpeaker] = useState<PartnerSpeaker | null>(null)
+  const [isWhisperPreviewPlaying, setIsWhisperPreviewPlaying] = useState(false)
+  const [delayedLiveWhisperHint, setDelayedLiveWhisperHint] = useState<WhisperHint | null>(null)
+  const [isLiveWhisperLoading, setIsLiveWhisperLoading] = useState(false)
+  const [recoverableWhisperBubble, setRecoverableWhisperBubble] = useState<RecoverableWhisperBubble | null>(null)
   const [currentQuoteIndex, setCurrentQuoteIndex] = useState(0)
+  const [starterTypingSpeaker, setStarterTypingSpeaker] = useState<PartnerSpeaker | null>(null)
+  const [transcriptBottomClearance, setTranscriptBottomClearance] = useState(defaultTranscriptBottomClearance)
   const transcriptRef = useRef<HTMLDivElement>(null)
   const draftInputRef = useRef<HTMLInputElement>(null)
+  const inputDockRef = useRef<HTMLDivElement>(null)
   const recognitionRef = useRef<BrowserSpeechRecognition | null>(null)
+  const starterReplyTimeoutRef = useRef<number | null>(null)
+  const callPanelTransitionTimeoutRef = useRef<number | null>(null)
   const speechBaseDraftRef = useRef('')
   const finalizedSpeechRef = useRef('')
   const availableVoicesRef = useRef<SpeechSynthesisVoice[]>([])
   const lastAutoSpokenMessageIdRef = useRef<string | null>(null)
+  const liveAssistantAudioPlayerRef = useRef<LiveAssistantAudioPlayer | null>(null)
+  const speechPlaybackIdRef = useRef(0)
+  const transcriptBottomClearanceRef = useRef(defaultTranscriptBottomClearance)
+  const whisperRevealTimeoutRef = useRef<number | null>(null)
+  const whisperLoadingStartedAtRef = useRef<number | null>(null)
   const messages = conversation.messages
+  const isLiveMode = practiceMode === 'live'
   const speechSupported = isSpeechRecognitionSupported()
+  const isStarterTyping = starterTypingSpeaker !== null
   const hasDraft = draft.trim().length > 0
-  const userTurnCount = messages.filter((message) => message.speaker === 'User').length
-  const canRequestRecap = userTurnCount >= 1
-  const shouldShowStarters = userTurnCount === 0 && selectedStarterId === null
+  const currentUserTurnCount = messages.filter((message) => message.speaker === 'User').length
+  const sessionUserTurnCount = sessionMessages.filter((message) => message.speaker === 'User').length
+  const canRequestRecap = sessionUserTurnCount >= 1
+  const isRecapButtonActive = canRequestRecap && !isSubmitting && !isRecapLoading
+  const shouldShowStarters = currentUserTurnCount === 0 && selectedStarterId === null
   const visibleMessages = shouldShowStarters ? [] : messages
   const latestAssistantMessage = findLatestAssistantMessage(visibleMessages)
   const currentQuote = rotatingQuotes[currentQuoteIndex]
   const isCafeOrderScenario = selectedStarterId === 'cafe-order'
-  const activeCallSpeaker: PartnerSpeaker =
-    speakingSpeaker ?? (latestAssistantMessage?.speaker === 'Cookie' ? 'Cookie' : 'Cream')
-  const callPanelSpeaker: PartnerSpeaker = isCafeOrderScenario ? 'Cream' : activeCallSpeaker
-  const callPanelRole =
-    callPanelSpeaker === 'Cookie' ? 'I jump in to teach you' : "I'm your chatty partner"
-  const isCallPanelSpeaking = speakingSpeaker === callPanelSpeaker
+  const callPanelSpeaker: PartnerSpeaker = 'Cream'
+  const callPanelRole = isCafeOrderScenario
+    ? "I'm your barista for this scene"
+    : 'I keep the conversation moving'
+  const isCallPanelSpeaking = !isWhisperPreviewPlaying && speakingSpeaker === callPanelSpeaker
+  const showCafeCallPanel = isCafeOrderScenario && callPanelSpeaker === 'Cream'
+  const currentCallPanelView: CallPanelView = {
+    role: callPanelRole,
+    showCafeBackdrop: showCafeCallPanel,
+    speaker: callPanelSpeaker,
+  }
+  const [displayedCallPanelView, setDisplayedCallPanelView] = useState<CallPanelView>(currentCallPanelView)
+  const [outgoingCallPanelView, setOutgoingCallPanelView] = useState<CallPanelView | null>(null)
   const modelAttributionModelId = turnMeta?.modelId
   const recapPresentation = sessionRecap
-    ? buildSessionRecapPresentation(sessionRecap, conversation.messages)
+    ? buildSessionRecapPresentation(sessionRecap, sessionMessages)
     : null
+  const transcriptStyle = {
+    '--transcript-bottom-clearance': `${transcriptBottomClearance}px`,
+  } as CSSProperties
+
+  const renderCallPanelCard = (
+    view: CallPanelView,
+    options: { animationClassName?: string; isSpeaking: boolean },
+  ) => (
+    <div
+      className={`call-panel-card call-panel-card--${view.speaker.toLowerCase()}${
+        options.isSpeaking ? ' call-panel-card--speaking' : ''
+      }${view.showCafeBackdrop ? ' call-panel-card--cafe-backdrop' : ''}${
+        options.animationClassName ? ` ${options.animationClassName}` : ''
+      }`}
+    >
+      {view.showCafeBackdrop ? (
+        <div
+          aria-hidden="true"
+          className="call-panel-card-backdrop"
+          style={{ backgroundImage: `url(${CafeCreamBackdrop})` }}
+        />
+      ) : null}
+      <div className={`call-panel-card-content${view.showCafeBackdrop ? ' call-panel-card-content--cafe' : ''}`}>
+        <div className="call-panel-image-wrap">
+          <img
+            className="call-panel-image"
+            src={avatarBySpeaker[view.speaker]}
+            alt={`${view.speaker} profile`}
+          />
+        </div>
+        <div className="call-panel-meta">
+          <p className="call-panel-name">{view.speaker}</p>
+          <p className="call-panel-role">{view.role}</p>
+        </div>
+      </div>
+    </div>
+  )
+
+  const callPanelProfileCard = outgoingCallPanelView ? (
+    <div className="call-panel-card-stack">
+      <div aria-hidden="true" className="call-panel-card-layer">
+        {renderCallPanelCard(outgoingCallPanelView, {
+          animationClassName: 'call-panel-card--fade-out',
+          isSpeaking: false,
+        })}
+      </div>
+      <div className="call-panel-card-layer">
+        {renderCallPanelCard(displayedCallPanelView, {
+          animationClassName: 'call-panel-card--fade-in',
+          isSpeaking: isCallPanelSpeaking,
+        })}
+      </div>
+    </div>
+  ) : (
+    renderCallPanelCard(displayedCallPanelView, {
+      isSpeaking: isCallPanelSpeaking,
+    })
+  )
+
+  const clearStarterReplyTimeout = () => {
+    if (starterReplyTimeoutRef.current === null) {
+      return
+    }
+
+    window.clearTimeout(starterReplyTimeoutRef.current)
+    starterReplyTimeoutRef.current = null
+  }
+
+  const clearWhisperRevealTimeout = () => {
+    if (whisperRevealTimeoutRef.current === null) {
+      return
+    }
+
+    window.clearTimeout(whisperRevealTimeoutRef.current)
+    whisperRevealTimeoutRef.current = null
+  }
+
+  useEffect(() => {
+    return () => {
+      if (callPanelTransitionTimeoutRef.current === null) {
+        return
+      }
+
+      window.clearTimeout(callPanelTransitionTimeoutRef.current)
+      callPanelTransitionTimeoutRef.current = null
+    }
+  }, [])
+
+  useEffect(() => {
+    if (getCallPanelViewKey(displayedCallPanelView) === getCallPanelViewKey(currentCallPanelView)) {
+      return
+    }
+
+    if (callPanelTransitionTimeoutRef.current !== null) {
+      window.clearTimeout(callPanelTransitionTimeoutRef.current)
+      callPanelTransitionTimeoutRef.current = null
+    }
+
+    if (displayedCallPanelView.speaker === currentCallPanelView.speaker) {
+      setOutgoingCallPanelView(null)
+      setDisplayedCallPanelView(currentCallPanelView)
+      return
+    }
+
+    setOutgoingCallPanelView(displayedCallPanelView)
+    setDisplayedCallPanelView(currentCallPanelView)
+    callPanelTransitionTimeoutRef.current = window.setTimeout(() => {
+      setOutgoingCallPanelView(null)
+      callPanelTransitionTimeoutRef.current = null
+    }, 240)
+  }, [currentCallPanelView, displayedCallPanelView])
 
   const scrollTranscriptToBottom = () => {
     const transcript = transcriptRef.current
@@ -544,10 +716,91 @@ function App() {
     transcript.scrollTop = transcript.scrollHeight
   }
 
-  const playMessageSpeech = (message: Message, options: { announceUnsupported?: boolean } = {}) => {
-    const { announceUnsupported = true } = options
+  const isTranscriptNearBottom = () => {
+    const transcript = transcriptRef.current
 
-    if (message.speaker === 'User') {
+    if (!transcript) {
+      return true
+    }
+
+    return transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight <= 96
+  }
+
+  const syncTranscriptBottomClearance = () => {
+    const inputDock = inputDockRef.current
+    const dockHeight = inputDock ? Math.ceil(inputDock.getBoundingClientRect().height) : baseInputDockHeight
+    const nextClearance =
+      defaultTranscriptBottomClearance + Math.max(0, dockHeight - baseInputDockHeight)
+
+    if (nextClearance === transcriptBottomClearanceRef.current) {
+      return
+    }
+
+    const shouldKeepBottomAnchor = isTranscriptNearBottom()
+
+    transcriptBottomClearanceRef.current = nextClearance
+    setTranscriptBottomClearance(nextClearance)
+
+    if (shouldKeepBottomAnchor) {
+      window.requestAnimationFrame(() => {
+        scrollTranscriptToBottom()
+      })
+    }
+  }
+
+  const cancelSpeechPlayback = () => {
+    speechPlaybackIdRef.current += 1
+    liveAssistantAudioPlayerRef.current?.stop()
+    window.speechSynthesis?.cancel()
+    setIsWhisperPreviewPlaying(false)
+    setSpeakingSpeaker(null)
+  }
+
+  const appendSessionMessages = (nextMessages: Message[]) => {
+    const recapMessages = nextMessages.filter((message) => message.speaker !== 'System')
+
+    if (recapMessages.length === 0) {
+      return
+    }
+
+    const nextSessionMessages = [...sessionMessagesRef.current, ...recapMessages]
+
+    sessionMessagesRef.current = nextSessionMessages
+    setSessionMessages(nextSessionMessages)
+    saveSessionMessages(nextSessionMessages)
+    setSessionRecap(null)
+  }
+
+  const getSpeechQueue = (message: Message) => {
+    const voices =
+      availableVoicesRef.current.length > 0 ? availableVoicesRef.current : window.speechSynthesis.getVoices()
+    const englishVoice = selectPreferredVoice(voices, 'Cookie')
+    const spanishVoice = selectPreferredVoice(voices, 'Cream')
+
+    return getSpeechTextSegments(message)
+      .map((segment) => {
+        const isEnglish = message.speaker === 'Cookie' ? segment.isEnglish : false
+
+        return {
+          lang: isEnglish ? englishVoice?.lang ?? 'en-US' : spanishVoice?.lang ?? 'es-ES',
+          text: segment.text,
+          voice: isEnglish ? englishVoice : spanishVoice,
+        }
+      })
+      .filter((segment) => segment.text.trim().length > 0)
+  }
+
+  // We keep both Sonic audio playback and browser speech synthesis in the same control
+  // path so the UI has one idea of "who is speaking" even when the transport changes.
+  // It is a little more coupled than ideal, but it avoids a class of demo bugs where
+  // the avatar, replay controls, and audio fallback disagree about playback state.
+  const playMessageSpeech = (
+    message: Message,
+    options: { announceUnsupported?: boolean; onEnd?: () => void; onStart?: () => void } = {},
+  ) => {
+    const { announceUnsupported = true, onEnd, onStart } = options
+
+    if (message.speaker === 'User' || message.speaker === 'System') {
       return false
     }
 
@@ -563,32 +816,127 @@ function App() {
       return false
     }
 
-    window.speechSynthesis.cancel()
-    setSpeakingSpeaker(null)
+    cancelSpeechPlayback()
 
-    const utterance = new SpeechSynthesisUtterance(message.text)
-    const preferredVoice = selectPreferredVoice(
-      availableVoicesRef.current.length > 0 ? availableVoicesRef.current : window.speechSynthesis.getVoices(),
-      message.speaker === 'Cookie' ? 'Cookie' : 'Cream',
-    )
-    utterance.lang = preferredVoice?.lang ?? (message.speaker === 'Cream' ? 'es-ES' : 'en-US')
-    utterance.voice = preferredVoice
-    utterance.rate = 0.95
-    utterance.onstart = () => {
-      setSpeakingSpeaker(message.speaker === 'Cookie' ? 'Cookie' : 'Cream')
-      setSpeechStatusMessage(null)
-    }
-    utterance.onend = () => {
-      setSpeakingSpeaker(null)
-    }
-    utterance.onerror = () => {
-      setSpeakingSpeaker(null)
-      setSpeechStatusMessage('Speech playback failed. Try again.')
+    const playbackId = speechPlaybackIdRef.current
+    const speechQueue = getSpeechQueue(message)
+
+    if (speechQueue.length === 0) {
+      return false
     }
 
-    window.speechSynthesis.speak(utterance)
+    const speakQueueItem = (queueIndex: number) => {
+      const currentSegment = speechQueue[queueIndex]
+
+      if (!currentSegment || speechPlaybackIdRef.current !== playbackId) {
+        return
+      }
+
+      const utterance = new SpeechSynthesisUtterance(currentSegment.text)
+      utterance.lang = currentSegment.lang
+      utterance.voice = currentSegment.voice
+      utterance.rate = 0.95
+      utterance.onstart = () => {
+        if (speechPlaybackIdRef.current !== playbackId) {
+          return
+        }
+
+        setSpeakingSpeaker(message.speaker === 'Cookie' ? 'Cookie' : 'Cream')
+        onStart?.()
+        setSpeechStatusMessage(null)
+      }
+      utterance.onend = () => {
+        if (speechPlaybackIdRef.current !== playbackId) {
+          return
+        }
+
+        if (queueIndex === speechQueue.length - 1) {
+          onEnd?.()
+          setSpeakingSpeaker(null)
+          return
+        }
+
+        speakQueueItem(queueIndex + 1)
+      }
+      utterance.onerror = () => {
+        if (speechPlaybackIdRef.current !== playbackId) {
+          return
+        }
+
+        onEnd?.()
+        setSpeakingSpeaker(null)
+        setSpeechStatusMessage('Speech playback failed. Try again.')
+      }
+
+      window.speechSynthesis.speak(utterance)
+    }
+
+    speakQueueItem(0)
 
     return true
+  }
+
+  const playAssistantAudio = async (
+    message: Message,
+    options: { announceUnsupported?: boolean; onEnd?: () => void; onStart?: () => void } = {},
+  ) => {
+    if (message.speaker === 'User' || message.speaker === 'System') {
+      return false
+    }
+
+    if (practiceMode !== 'live') {
+      return playMessageSpeech(message, options)
+    }
+
+    if (!liveAssistantAudioPlayerRef.current) {
+      liveAssistantAudioPlayerRef.current = new LiveAssistantAudioPlayer()
+    }
+
+    cancelSpeechPlayback()
+
+    const playbackId = speechPlaybackIdRef.current
+
+    try {
+      await liveAssistantAudioPlayerRef.current.play(
+        {
+          learnerLanguage: fluentLanguage,
+          speaker: message.speaker,
+          targetLanguage: learningLanguage,
+          text: message.text,
+        },
+        {
+          onStart: () => {
+            if (speechPlaybackIdRef.current !== playbackId) {
+              return
+            }
+
+            setSpeakingSpeaker(message.speaker === 'Cookie' ? 'Cookie' : 'Cream')
+            options.onStart?.()
+            setSpeechStatusMessage(null)
+          },
+          onEnd: () => {
+            if (speechPlaybackIdRef.current !== playbackId) {
+              return
+            }
+
+            options.onEnd?.()
+            setSpeakingSpeaker(null)
+          },
+        },
+      )
+
+      return true
+    } catch (error) {
+      if (speechPlaybackIdRef.current !== playbackId) {
+        return false
+      }
+
+      console.warn('Nova assistant audio playback failed. Falling back to browser speech synthesis.', error)
+      options.onEnd?.()
+      setSpeakingSpeaker(null)
+
+      return playMessageSpeech(message, options)
+    }
   }
 
   useEffect(() => {
@@ -604,9 +952,49 @@ function App() {
   }, [sessionRecap])
 
   useEffect(() => {
+    if (!starterTypingSpeaker) {
+      return
+    }
+
+    scrollTranscriptToBottom()
+  }, [starterTypingSpeaker])
+
+  useLayoutEffect(() => {
+    syncTranscriptBottomClearance()
+
+    const inputDock = inputDockRef.current
+
+    if (!inputDock) {
+      return
+    }
+
+    if (typeof ResizeObserver === 'undefined') {
+      window.addEventListener('resize', syncTranscriptBottomClearance)
+
+      return () => {
+        window.removeEventListener('resize', syncTranscriptBottomClearance)
+      }
+    }
+
+    const resizeObserver = new ResizeObserver(() => {
+      syncTranscriptBottomClearance()
+    })
+
+    resizeObserver.observe(inputDock)
+    window.addEventListener('resize', syncTranscriptBottomClearance)
+
     return () => {
+      resizeObserver.disconnect()
+      window.removeEventListener('resize', syncTranscriptBottomClearance)
+    }
+  }, [])
+
+  useEffect(() => {
+    return () => {
+      clearStarterReplyTimeout()
+      clearWhisperRevealTimeout()
       recognitionRef.current?.abort()
-      window.speechSynthesis?.cancel()
+      cancelSpeechPlayback()
     }
   }, [])
 
@@ -656,12 +1044,12 @@ function App() {
   }, [])
 
   useEffect(() => {
-    if (!hasStarted) {
+    if (!hasStarted || practiceMode === 'live') {
       return
     }
 
     draftInputRef.current?.focus()
-  }, [hasStarted])
+  }, [hasStarted, practiceMode])
 
   useEffect(() => {
     if (!hasStarted) {
@@ -679,37 +1067,278 @@ function App() {
 
     // Only auto-play once per assistant turn; the speak button remains a manual replay.
     lastAutoSpokenMessageIdRef.current = latestAssistantMessage.id
-    playMessageSpeech(latestAssistantMessage, { announceUnsupported: false })
-  }, [hasStarted, latestAssistantMessage])
+    void playAssistantAudio(latestAssistantMessage, { announceUnsupported: false })
+  }, [fluentLanguage, hasStarted, latestAssistantMessage, learningLanguage, practiceMode])
 
   const submitText = async (rawText: string) => {
     const text = rawText.trim()
 
-    if (!text || isSubmitting) {
+    if (!text || isSubmitting || isStarterTyping) {
       return
     }
 
+    clearStarterReplyTimeout()
+    setStarterTypingSpeaker(null)
     recognitionRef.current?.abort()
-    window.speechSynthesis?.cancel()
-    setSpeakingSpeaker(null)
+    cancelSpeechPlayback()
     setIsListening(false)
     setLiveTranscript('')
     setSpeechStatusMessage(null)
     setIsSubmitting(true)
-    setSessionRecap(null)
     setIsRecapModalOpen(false)
 
     try {
-      const result = await submitTurnWithFallback(conversation, text)
+      const result = await submitTurnWithFallback(conversation, text, selectedStarterId)
+      const newMessages = result.conversation.messages.slice(conversation.messages.length)
 
       console.info('Turn response meta:', { ...result.meta, delivery: result.delivery })
+      setRecoverableWhisperBubble(null)
       setConversation(result.conversation)
+      appendSessionMessages(newMessages)
       setTurnMeta(result.meta)
       setDraft('')
     } finally {
       setIsSubmitting(false)
     }
   }
+
+  const livePractice = useLivePractice({
+    onSubmit: submitText,
+    sessionInput: {
+      learnerLanguage: fluentLanguage,
+      targetLanguage: learningLanguage,
+      scenarioId: selectedStarterId,
+      recentMessages: conversation.messages.map((message) => ({
+        speaker: message.speaker,
+        text: message.text,
+      })),
+    },
+  })
+  const liveHelperText = getLiveHelperText({
+    errorMessage: livePractice.errorMessage,
+    status: livePractice.status,
+    utterance: livePractice.utterance,
+  })
+  const isLiveSessionActive =
+    livePractice.status === 'connecting' ||
+    livePractice.status === 'listening' ||
+    livePractice.status === 'waiting_for_pause' ||
+    livePractice.status === 'blocked_by_english'
+  const rawLiveSpeechDraft = livePractice.utterance.transcript || livePractice.utterance.finalTranscript
+  const optimisticLiveWhisperHint =
+    !livePractice.whisperHint && rawLiveSpeechDraft
+      ? inferOptimisticWhisperHint({
+          scenarioId: selectedStarterId,
+          transcript: rawLiveSpeechDraft,
+        })
+      : null
+  const composerWhisperHint = livePractice.whisperHint ?? optimisticLiveWhisperHint
+  const liveSpeechDraft = formatLiveTranscriptForComposer(rawLiveSpeechDraft, composerWhisperHint)
+  const hasLiveSpeechDraft = liveSpeechDraft.trim().length > 0
+  const isLiveSpeechResponding = livePractice.status === 'cream_responding'
+  const isWhisperAnalysisPending =
+    livePractice.utterance.transcriptVersion > livePractice.utterance.analysisVersion
+  const isLiveSpeechComposerVisible =
+    isLiveSessionActive ||
+    livePractice.status === 'auto_submitting' ||
+    isLiveSpeechResponding ||
+    livePractice.status === 'error' ||
+    hasLiveSpeechDraft
+  const isLiveSpeechStreaming = livePractice.hasActiveSession
+  const canRetryLiveSpeech =
+    isLiveMode &&
+    isLiveSpeechComposerVisible &&
+    !isSubmitting &&
+    !isStarterTyping &&
+    livePractice.status !== 'connecting' &&
+    livePractice.status !== 'auto_submitting' &&
+    !isLiveSpeechResponding
+  const showResumeLiveSpeech =
+    isLiveMode &&
+    isLiveSpeechComposerVisible &&
+    !livePractice.hasActiveSession &&
+    livePractice.status !== 'auto_submitting' &&
+    livePractice.status !== 'error'
+  const liveSpeechFieldPlaceholder =
+    livePractice.status === 'auto_submitting'
+      ? 'Sending your turn...'
+      : isLiveSpeechResponding
+        ? 'Cream is responding...'
+      : showResumeLiveSpeech
+        ? 'Tap mic to speak again'
+      : 'Listening...'
+  const canResumeLiveSpeech =
+    showResumeLiveSpeech &&
+    !isSubmitting &&
+    !isStarterTyping &&
+    speakingSpeaker === null &&
+    !isLiveSpeechResponding
+  const canStopLiveSpeech =
+    isLiveMode && livePractice.hasActiveSession && !isSubmitting && !isStarterTyping
+  const canSubmitLiveSpeech =
+    isLiveMode &&
+    hasLiveSpeechDraft &&
+    !isSubmitting &&
+    !isStarterTyping &&
+    livePractice.status !== 'connecting' &&
+    livePractice.status !== 'auto_submitting' &&
+    !isLiveSpeechResponding
+  const activeLiveWhisperHint = isLiveMode ? delayedLiveWhisperHint : null
+  const recoverableLiveWhisperBubble = isLiveMode && !activeLiveWhisperHint ? recoverableWhisperBubble : null
+  const liveWhisperHint = activeLiveWhisperHint ?? recoverableLiveWhisperBubble?.hint ?? null
+  const isRecoverableWhisperBubbleVisible = recoverableLiveWhisperBubble !== null
+  const isLiveWhisperBubbleCollapsed = recoverableLiveWhisperBubble?.isVisible === false
+  const showDockWhisperLoading = isLiveMode && isLiveWhisperLoading && !recoverableLiveWhisperBubble
+  const showLiveTryAgainCta =
+    activeLiveWhisperHint !== null &&
+    hasLiveSpeechDraft &&
+    isLiveSpeechComposerVisible &&
+    !isSubmitting &&
+    !isStarterTyping &&
+    livePractice.status !== 'connecting' &&
+    livePractice.status !== 'auto_submitting' &&
+    !isLiveSpeechResponding
+  const showLiveSpeechLeadingAction = isLiveSpeechStreaming || showResumeLiveSpeech
+  const isLiveStartDisabled = !isLiveMode || isSubmitting || isStarterTyping
+
+  useEffect(() => {
+    // The whisper bubble deliberately waits a beat before appearing so the UI feels
+    // intentional rather than jittery. In practice, optimistic local hints arrive
+    // before the real backend analysis on fast machines, so we smooth the transition
+    // here instead of asking the backend to model presentation timing.
+    if (practiceMode !== 'live') {
+      clearWhisperRevealTimeout()
+      whisperLoadingStartedAtRef.current = null
+      setDelayedLiveWhisperHint(null)
+      setIsLiveWhisperLoading(false)
+      return
+    }
+
+    if (recoverableWhisperBubble) {
+      clearWhisperRevealTimeout()
+      whisperLoadingStartedAtRef.current = null
+      setDelayedLiveWhisperHint(null)
+      setIsLiveWhisperLoading(false)
+      return
+    }
+
+    const realWhisperHint = livePractice.whisperHint
+    const shouldPrimeWhisperLoading =
+      optimisticLiveWhisperHint !== null &&
+      hasLiveSpeechDraft &&
+      (isWhisperAnalysisPending || realWhisperHint !== null)
+
+    if (shouldPrimeWhisperLoading && whisperLoadingStartedAtRef.current === null) {
+      whisperLoadingStartedAtRef.current = Date.now()
+    }
+
+    if (!realWhisperHint) {
+      clearWhisperRevealTimeout()
+      setDelayedLiveWhisperHint(null)
+
+      if (shouldPrimeWhisperLoading) {
+        setIsLiveWhisperLoading(true)
+        return
+      }
+
+      whisperLoadingStartedAtRef.current = null
+      setIsLiveWhisperLoading(false)
+      return
+    }
+
+    const loadingStartedAt = whisperLoadingStartedAtRef.current ?? Date.now()
+    const remainingLoadingMs = Math.max(0, liveWhisperMinimumLoadingMs - (Date.now() - loadingStartedAt))
+
+    clearWhisperRevealTimeout()
+
+    if (remainingLoadingMs === 0) {
+      whisperLoadingStartedAtRef.current = null
+      setDelayedLiveWhisperHint(realWhisperHint)
+      setIsLiveWhisperLoading(false)
+      return
+    }
+
+    setDelayedLiveWhisperHint(null)
+    setIsLiveWhisperLoading(true)
+    whisperRevealTimeoutRef.current = window.setTimeout(() => {
+      whisperRevealTimeoutRef.current = null
+      whisperLoadingStartedAtRef.current = null
+      setDelayedLiveWhisperHint(realWhisperHint)
+      setIsLiveWhisperLoading(false)
+    }, remainingLoadingMs)
+  }, [
+    hasLiveSpeechDraft,
+    isWhisperAnalysisPending,
+    livePractice.whisperHint,
+    optimisticLiveWhisperHint,
+    practiceMode,
+    recoverableWhisperBubble,
+  ])
+
+  useEffect(() => {
+    if (!showDockWhisperLoading) {
+      return
+    }
+
+    scrollTranscriptToBottom()
+  }, [showDockWhisperLoading])
+
+  useEffect(() => {
+    if (practiceMode === 'live') {
+      recognitionRef.current?.abort()
+      setIsListening(false)
+      setLiveTranscript('')
+      setSpeechStatusMessage(null)
+      return
+    }
+
+    livePractice.reset()
+  }, [practiceMode])
+
+  useEffect(() => {
+    if (practiceMode !== 'live') {
+      setRecoverableWhisperBubble(null)
+      return
+    }
+
+    if (livePractice.whisperHint) {
+      setRecoverableWhisperBubble(null)
+    }
+  }, [practiceMode, livePractice.whisperHint])
+
+  useEffect(() => {
+    if (practiceMode !== 'live') {
+      return
+    }
+
+    // "cream_responding" is a user-facing state, not just a transport state. We hold
+    // onto it until either audio starts or the latest assistant message is available
+    // so the dock does not flicker back to idle between submit completion and playback.
+    if (livePractice.status !== 'cream_responding') {
+      return
+    }
+
+    if (speakingSpeaker) {
+      livePractice.markCreamResponding()
+      return
+    }
+
+    if (!isSubmitting && latestAssistantMessage) {
+      livePractice.markCreamResponseComplete()
+    }
+  }, [practiceMode, livePractice.status, speakingSpeaker, latestAssistantMessage, isSubmitting])
+
+  useEffect(() => {
+    if (practiceMode !== 'live') {
+      return
+    }
+
+    if (speakingSpeaker !== 'Cookie' || !livePractice.hasActiveSession) {
+      return
+    }
+
+    livePractice.stop()
+  }, [practiceMode, speakingSpeaker, livePractice.hasActiveSession])
 
   const handleRecapRequest = async () => {
     if (isRecapLoading || isSubmitting || !canRequestRecap) {
@@ -725,7 +1354,10 @@ function App() {
     setIsRecapLoading(true)
 
     try {
-      const result = await fetchSessionRecapWithFallback(conversation)
+      const result = await fetchSessionRecapWithFallback({
+        phase: conversation.phase,
+        messages: sessionMessagesRef.current,
+      })
 
       console.info('Session recap meta:', { ...result.meta, delivery: result.delivery })
       setSessionRecap(result.recap)
@@ -735,39 +1367,79 @@ function App() {
   }
 
   const handleStarterClick = (starter: ScenarioStarter) => {
-    if (isSubmitting || isListening) {
+    if (isSubmitting || isListening || isLiveSessionActive) {
       return
     }
 
-    setConversation({
-      phase: 'normal',
-      messages: [
-        {
-          id: 'cream-1',
-          speaker: 'Cream',
-          text: starter.openingPrompt,
-        },
-      ],
-    })
-    window.speechSynthesis?.cancel()
-    setSpeakingSpeaker(null)
+    livePractice.reset()
+    setRecoverableWhisperBubble(null)
+    clearStarterReplyTimeout()
+    cancelSpeechPlayback()
+    lastAutoSpokenMessageIdRef.current = null
     setSelectedStarterId(starter.id)
     setDraft('')
+    setTurnMeta(null)
     setMessageTranslations({})
-    setSessionRecap(null)
     setIsRecapModalOpen(false)
     setSpeechStatusMessage(null)
     setLiveTranscript('')
-    scrollTranscriptToBottom()
+
+    if (starter.id === 'cafe-order') {
+      const starterMessages: Message[] = [
+        {
+          id: 'system-cafe-1',
+          speaker: 'System',
+          text: 'You are now at a cafe',
+        },
+      ]
+
+      setConversation({
+        phase: 'normal',
+        messages: starterMessages,
+      })
+      setStarterTypingSpeaker('Cream')
+      starterReplyTimeoutRef.current = window.setTimeout(() => {
+        const openingMessage: Message = {
+          id: 'cream-1',
+          speaker: 'Cream',
+          text: starter.openingPrompt,
+        }
+
+        setStarterTypingSpeaker(null)
+        setConversation((currentConversation) => ({
+          phase: currentConversation.phase,
+          messages: [...currentConversation.messages, openingMessage],
+        }))
+        appendSessionMessages([openingMessage])
+        starterReplyTimeoutRef.current = null
+      }, 1600)
+      return
+    }
+
+    const openingMessage: Message = {
+      id: 'cream-1',
+      speaker: 'Cream',
+      text: starter.openingPrompt,
+    }
+
+    setStarterTypingSpeaker(null)
+    setConversation({
+      phase: 'normal',
+      messages: [openingMessage],
+    })
+    appendSessionMessages([openingMessage])
   }
 
   const handleRecapModalClose = () => {
     setIsRecapModalOpen(false)
   }
 
-  const handlePracticeFromScratch = () => {
+  const resetCurrentPractice = () => {
+    livePractice.reset()
+    setRecoverableWhisperBubble(null)
+    clearStarterReplyTimeout()
     recognitionRef.current?.abort()
-    window.speechSynthesis?.cancel()
+    cancelSpeechPlayback()
     lastAutoSpokenMessageIdRef.current = null
     setConversation(initialConversation)
     setSelectedStarterId(null)
@@ -776,22 +1448,37 @@ function App() {
     setLiveTranscript('')
     setSpeechStatusMessage(null)
     setTurnMeta(null)
-    setSessionRecap(null)
     setIsRecapModalOpen(false)
     setMessageTranslations({})
-    setSpeakingSpeaker(null)
+    setStarterTypingSpeaker(null)
+  }
+
+  const handlePracticeFromScratch = () => {
+    resetCurrentPractice()
+  }
+
+  const handleEndSession = () => {
+    resetCurrentPractice()
+    sessionMessagesRef.current = initialConversation.messages
+    setSessionMessages(initialConversation.messages)
+    clearSessionMessages()
+    setSessionRecap(null)
+    setHasStarted(false)
   }
 
   const handleReturnHome = () => {
-    window.speechSynthesis?.cancel()
-    setSpeakingSpeaker(null)
+    livePractice.reset()
+    setRecoverableWhisperBubble(null)
+    clearStarterReplyTimeout()
+    cancelSpeechPlayback()
+    setStarterTypingSpeaker(null)
     setHasStarted(false)
     setMessageTranslations({})
     setIsRecapModalOpen(false)
   }
 
   const handleSpeechStart = () => {
-    if (isSubmitting) {
+    if (isSubmitting || isStarterTyping) {
       return
     }
 
@@ -855,8 +1542,113 @@ function App() {
     recognition.start()
   }
 
+  const handleLiveStart = () => {
+    if (isSubmitting || isStarterTyping) {
+      return
+    }
+
+    void livePractice.start()
+  }
+
+  const handleLiveStop = () => {
+    if (!canStopLiveSpeech) {
+      return
+    }
+
+    livePractice.stop()
+  }
+
+  const handleLiveResume = () => {
+    if (!canResumeLiveSpeech) {
+      return
+    }
+
+    void livePractice.retry()
+  }
+
+  const handleLiveClear = () => {
+    if (!canRetryLiveSpeech) {
+      return
+    }
+
+    setRecoverableWhisperBubble(null)
+
+    if (!hasLiveSpeechDraft) {
+      livePractice.reset()
+      return
+    }
+
+    livePractice.clear()
+  }
+
+  const handleLiveTryAgain = () => {
+    if (!showLiveTryAgainCta) {
+      return
+    }
+
+    const whisperHint = livePractice.whisperHint
+
+    if (whisperHint) {
+      setRecoverableWhisperBubble({
+        hint: whisperHint,
+        isVisible: false,
+      })
+    }
+
+    cancelSpeechPlayback()
+    void livePractice.retry()
+  }
+
+  const handleLiveSubmit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+
+    if (!canSubmitLiveSpeech) {
+      return
+    }
+
+    void livePractice.submit()
+  }
+
   const handleMessageSpeak = (message: Message) => {
-    playMessageSpeech(message)
+    void playAssistantAudio(message)
+  }
+
+  const handleRecoverableWhisperVisibilityToggle = () => {
+    setRecoverableWhisperBubble((currentBubble) =>
+      currentBubble
+        ? {
+            ...currentBubble,
+            isVisible: !currentBubble.isVisible,
+          }
+        : currentBubble,
+    )
+  }
+
+  const handleWhisperSpeak = () => {
+    const whisperHint = liveWhisperHint
+
+    if (!whisperHint) {
+      return
+    }
+
+    const whisperSpeechText = formatWhisperSpeechText(whisperHint).trim()
+
+    if (!whisperSpeechText) {
+      return
+    }
+
+    void playAssistantAudio({
+      id: 'cookie-whisper-preview',
+      speaker: 'Cookie',
+      text: whisperSpeechText,
+    }, {
+      onEnd: () => {
+        setIsWhisperPreviewPlaying(false)
+      },
+      onStart: () => {
+        setIsWhisperPreviewPlaying(true)
+      },
+    })
   }
 
   const handleMessageActionPointerUp = (event: ReactPointerEvent<HTMLButtonElement>) => {
@@ -918,7 +1710,9 @@ function App() {
     }
   }
 
-  const inputPlaceholder = isListening
+  const inputPlaceholder = isStarterTyping
+    ? `${starterTypingSpeaker ?? 'Cream'} is thinking...`
+    : isListening
     ? liveTranscript
       ? ''
       : 'Listening...'
@@ -953,7 +1747,7 @@ function App() {
             <button className="home-header-brand" type="button" onClick={handleReturnHome}>
               Cookie &amp; Cream
             </button>
-            <span className="home-header-pill">Demo Only</span>
+            <span className="home-header-pill">Voice AI Demo</span>
           </div>
         </header>
 
@@ -963,27 +1757,27 @@ function App() {
               <h1 aria-label="Cookie and Cream" className="home-title home-title--icons">
                 <span
                   className="home-agent-badge-anchor home-agent-badge-anchor--cookie"
-                  aria-label="I'm Cookie. I jump in to teach you."
+                  aria-label="I'm Cookie. I whisper a quick fix when you slip."
                   tabIndex={0}
                 >
                   <span className="home-agent-badge">
                     <img className="home-agent-badge-image" src={CookieAvatar} alt="" />
                   </span>
-                  <span className="home-agent-tooltip">I&apos;m Cookie. I jump in to teach you.</span>
+                  <span className="home-agent-tooltip">I&apos;m Cookie. I whisper a quick fix when you slip.</span>
                 </span>
                 <span
                   className="home-agent-badge-anchor home-agent-badge-anchor--cream"
-                  aria-label="I'm Cream. I'm your chatty partner."
+                  aria-label="I'm Cream. I keep the conversation moving."
                   tabIndex={0}
                 >
                   <span className="home-agent-badge">
                     <img className="home-agent-badge-image" src={CreamAvatar} alt="" />
                   </span>
-                  <span className="home-agent-tooltip">I&apos;m Cream. I&apos;m your chatty partner.</span>
+                  <span className="home-agent-tooltip">I&apos;m Cream. I keep the conversation moving.</span>
                 </span>
               </h1>
               <p className="home-subtitle">
-                For <em>intermediate</em> speakers that say{' '}
+                For intermediate speakers who say{' '}
                 <span className="home-inline-quote" key={currentQuote}>
                   &quot;{renderInlineQuoteText(currentQuote)}&quot;
                 </span>
@@ -1000,7 +1794,7 @@ function App() {
                 />
 
                 <LanguageDropdown
-                  label="Native language"
+                  label="with Native Language"
                   options={nativeLanguageOptions}
                   value={fluentLanguage}
                   onChange={setFluentLanguage}
@@ -1008,7 +1802,7 @@ function App() {
               </div>
 
               <button className="home-start-button" type="button" onClick={() => setHasStarted(true)}>
-                Start Practice
+                Start Live Practice
               </button>
             </div>
           </div>
@@ -1025,8 +1819,8 @@ function App() {
             >
               Amazon Nova Hackathon
             </a>
-            . Cookie &amp; Cream uses Amazon Nova on Amazon Bedrock for reviewed transcript turns,
-            session recaps, and on-demand translation.
+            . Live voice runs on Nova Sonic. Amazon Nova on Bedrock handles whisper repair, turn
+            routing, recap, and translation.
           </p>
         </footer>
       </main>
@@ -1040,52 +1834,34 @@ function App() {
           <button className="home-header-brand" type="button" onClick={handleReturnHome}>
             Cookie &amp; Cream
           </button>
-          <button
-            className="recap-button home-header-recap"
-            disabled={!canRequestRecap || isSubmitting || isRecapLoading}
-            type="button"
-            onClick={handleRecapRequest}
-          >
-            {isRecapLoading ? 'Preparing recap...' : 'Session recap'}
-          </button>
+          <div className="home-header-actions">
+            <button
+              className="recap-button home-header-reset"
+              disabled={isSubmitting || isRecapLoading}
+              type="button"
+              onClick={handlePracticeFromScratch}
+            >
+              Start from scratch
+            </button>
+            <button
+              className={`recap-button home-header-recap${isRecapButtonActive ? ' home-header-recap--active' : ''}`}
+              disabled={!canRequestRecap || isSubmitting || isRecapLoading}
+              type="button"
+              onClick={handleRecapRequest}
+            >
+              {isRecapLoading ? 'Preparing recap...' : 'Session recap'}
+            </button>
+          </div>
         </div>
       </header>
 
       <section className="app-body" aria-label="Cookie and Cream prototype">
         <div className="chat-layout">
           <aside
-            className={`call-panel${isCafeOrderScenario ? ' call-panel--stacked' : ''}`}
+            className="call-panel"
             aria-label={`${callPanelSpeaker} call panel`}
           >
-            <div
-              className={`call-panel-card call-panel-card--${callPanelSpeaker.toLowerCase()}${
-                isCallPanelSpeaking ? ' call-panel-card--speaking' : ''
-              }${isCafeOrderScenario ? ' call-panel-card--scenario' : ''}`}
-            >
-              <img
-                className="call-panel-image"
-                src={avatarBySpeaker[callPanelSpeaker]}
-                alt={`${callPanelSpeaker} profile`}
-              />
-              <div className="call-panel-meta">
-                <p className="call-panel-name">{callPanelSpeaker} agent</p>
-                <p className="call-panel-role">{callPanelRole}</p>
-              </div>
-            </div>
-
-            {isCafeOrderScenario ? (
-              <figure className="call-panel-menu-card" aria-label="Coffee shop menu reference">
-                <img
-                  className="call-panel-menu-image"
-                  src={CafeMenuScene}
-                  alt="Coffee shop chalkboard menu with drinks, churros, sandwiches, tapas, and an espresso bar."
-                />
-                <figcaption className="call-panel-menu-caption">
-                  <span className="call-panel-menu-label">Cafe menu</span>
-                  <span className="call-panel-menu-note">Use it as visual context while ordering.</span>
-                </figcaption>
-              </figure>
-            ) : null}
+            {callPanelProfileCard}
           </aside>
 
           <section className="chat-pane" aria-label="Chat panel">
@@ -1094,6 +1870,7 @@ function App() {
                 className={`transcript${shouldShowStarters ? ' transcript--starter-state' : ''}`}
                 ref={transcriptRef}
                 aria-label="Transcript"
+                style={transcriptStyle}
               >
                 {shouldShowStarters ? (
                   <section className="starter-panel" aria-label="Conversation starters">
@@ -1115,6 +1892,16 @@ function App() {
                 ) : null}
 
                 {visibleMessages.map((message) => {
+                  if (message.speaker === 'System') {
+                    return (
+                      <article key={message.id} className="message-row message-row--system">
+                        <div className="message-system-bubble">
+                          <p>{message.text}</p>
+                        </div>
+                      </article>
+                    )
+                  }
+
                   if (message.speaker === 'User') {
                     return (
                       <article key={message.id} className="message-row message-row--user">
@@ -1207,72 +1994,235 @@ function App() {
                   )
                 })}
 
+                {isStarterTyping && starterTypingSpeaker ? (
+                  <article className="message-row message-row--partner message-row--typing" aria-live="polite">
+                    <div className="message-avatar" aria-hidden="true">
+                      <img src={avatarBySpeaker[starterTypingSpeaker]} alt="" />
+                    </div>
+                    <div className="message-partner-stack">
+                      <div className="message-typing-bubble" role="status" aria-label={`${starterTypingSpeaker} is typing`}>
+                        <span className="message-typing-dot" />
+                        <span className="message-typing-dot" />
+                        <span className="message-typing-dot" />
+                      </div>
+                    </div>
+                  </article>
+                ) : null}
+
               </section>
 
-              <div className="input-dock">
-                <form
-                  className={`action-composer${isListening ? ' action-composer--listening' : ''}`}
-                  onSubmit={handleSubmit}
+              <div className="input-dock" ref={inputDockRef}>
+                {/* Practice mode split is hidden for now. Live remains the active path. */}
+
+                {/* Suggested next steps are intentionally hidden for now. */}
+
+                {showDockWhisperLoading ? (
+                  <WhisperBubbleLoading avatarSrc={CookieAvatar} />
+                ) : liveWhisperHint ? (
+                  <WhisperBubble
+                    avatarSrc={CookieAvatar}
+                    hint={liveWhisperHint}
+                    isCollapsed={isLiveWhisperBubbleCollapsed}
+                    isRecoverable={isRecoverableWhisperBubbleVisible}
+                    isSpeaking={isWhisperPreviewPlaying}
+                    onActionPointerUp={handleMessageActionPointerUp}
+                    onSpeak={handleWhisperSpeak}
+                    onToggleVisibility={isRecoverableWhisperBubbleVisible ? handleRecoverableWhisperVisibilityToggle : undefined}
+                  />
+                ) : null}
+
+                <div
+                  className={`practice-composer-stage practice-composer-stage--${isLiveMode ? 'live' : 'reviewed'}${
+                    isLiveSpeechComposerVisible ? ' practice-composer-stage--active' : ''
+                  }${
+                    !isLiveSpeechComposerVisible && isLiveStartDisabled ? ' practice-composer-stage--disabled' : ''
+                  }`}
                 >
-                  <button
-                    aria-label={isListening ? 'Stop speech input' : 'Start speech input'}
-                    className="action-composer-mic"
-                    disabled={isSubmitting}
-                    type="button"
-                    onClick={handleSpeechStart}
+                  <div aria-hidden="true" className="practice-composer-shell" />
+                  <div className="live-composer" aria-hidden={!isLiveMode} aria-label="Live practice controls">
+                    <div className={`live-control-group${isLiveSpeechComposerVisible ? ' live-control-group--active' : ''}`}>
+                      {isLiveSpeechComposerVisible ? (
+                        <form
+                          className={`live-speech-composer${isLiveSpeechStreaming ? ' live-speech-composer--streaming' : ''}${
+                            showLiveSpeechLeadingAction ? ' live-speech-composer--with-leading-action' : ''
+                          }`}
+                          onSubmit={handleLiveSubmit}
+                        >
+                          {isLiveSpeechStreaming ? (
+                            <button
+                              aria-label="Stop listening"
+                              className="live-speech-action live-speech-action--stop"
+                              disabled={!canStopLiveSpeech}
+                              type="button"
+                              onClick={handleLiveStop}
+                            >
+                              <span aria-hidden="true" className="action-button-stop-mark live-speech-stop-mark" />
+                            </button>
+                          ) : showResumeLiveSpeech ? (
+                            <button
+                              aria-label="Resume listening"
+                              className="live-speech-action live-speech-action--resume"
+                              disabled={!canResumeLiveSpeech}
+                              type="button"
+                              onClick={handleLiveResume}
+                            >
+                              <svg
+                                aria-hidden="true"
+                                className="action-button-icon action-button-icon--mic"
+                                viewBox="0 0 24 24"
+                              >
+                                <path d="M12 15.75a3 3 0 0 0 3-3V6a3 3 0 1 0-6 0v6.75a3 3 0 0 0 3 3Z" />
+                                <path d="M18 11.25v1.5a6 6 0 0 1-12 0v-1.5" />
+                                <path d="M12 18.75v3.75" />
+                                <path d="M8.25 22.5h7.5" />
+                              </svg>
+                            </button>
+                          ) : null}
+
+                          <div
+                            aria-label="Speak Input"
+                            aria-live={livePractice.status === 'auto_submitting' ? undefined : 'polite'}
+                            aria-readonly="true"
+                            className="live-speech-field"
+                            role="textbox"
+                          >
+                            <p className={`live-speech-field-text${hasLiveSpeechDraft ? '' : ' live-speech-field-text--placeholder'}`}>
+                              {hasLiveSpeechDraft ? liveSpeechDraft : liveSpeechFieldPlaceholder}
+                            </p>
+                          </div>
+
+                          <div className="live-speech-action-slot">
+                            {showLiveTryAgainCta ? (
+                              <button
+                                aria-label="Try again"
+                                className="live-speech-action live-speech-action--try-again"
+                                type="button"
+                                onClick={handleLiveTryAgain}
+                              >
+                                Try Again
+                              </button>
+                            ) : (
+                              <div className="live-speech-action-pair">
+                                <button
+                                  aria-label="Clear spoken input"
+                                  className="live-speech-action live-speech-action--clear"
+                                  disabled={!canRetryLiveSpeech}
+                                  type="button"
+                                  onClick={handleLiveClear}
+                                >
+                                  Clear
+                                </button>
+
+                                <button
+                                  aria-label="Send spoken turn"
+                                  className="live-speech-action live-speech-action--send"
+                                  disabled={!canSubmitLiveSpeech}
+                                  type="submit"
+                                >
+                                  <svg
+                                    aria-hidden="true"
+                                    className="action-button-icon action-button-icon--send"
+                                    viewBox="0 0 16 16"
+                                  >
+                                    <path d="M3.5 8h8" />
+                                    <path d="M8.5 3.5 13 8l-4.5 4.5" />
+                                  </svg>
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                        </form>
+                      ) : (
+                        <button
+                          aria-label="Start live speech input"
+                          className="live-control-button live-control-button--main"
+                          disabled={isLiveStartDisabled}
+                          type="button"
+                          onClick={handleLiveStart}
+                        >
+                          <svg aria-hidden="true" className="action-button-icon action-button-icon--mic live-control-start-icon" viewBox="0 0 24 24">
+                            <path d="M12 15.75a3 3 0 0 0 3-3V6a3 3 0 1 0-6 0v6.75a3 3 0 0 0 3 3Z" />
+                            <path d="M18 11.25v1.5a6 6 0 0 1-12 0v-1.5" />
+                            <path d="M12 18.75v3.75" />
+                            <path d="M8.25 22.5h7.5" />
+                          </svg>
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  <form
+                    aria-hidden={isLiveMode}
+                    className={`action-composer action-composer--staged${isListening ? ' action-composer--listening' : ''}`}
+                    onSubmit={handleSubmit}
                   >
-                    {isListening ? (
-                      <span aria-hidden="true" className="action-button-stop-mark" />
-                    ) : (
+                    <button
+                      aria-label={isListening ? 'Stop speech input' : 'Start speech input'}
+                      className="action-composer-mic"
+                      disabled={isLiveMode || isSubmitting || isStarterTyping}
+                      tabIndex={isLiveMode ? -1 : 0}
+                      type="button"
+                      onClick={handleSpeechStart}
+                    >
+                      {isListening ? (
+                        <span aria-hidden="true" className="action-button-stop-mark" />
+                      ) : (
+                        <svg
+                          aria-hidden="true"
+                          className="action-button-icon action-button-icon--mic"
+                          viewBox="0 0 24 24"
+                        >
+                          <path d="M12 15.75a3 3 0 0 0 3-3V6a3 3 0 1 0-6 0v6.75a3 3 0 0 0 3 3Z" />
+                          <path d="M18 11.25v1.5a6 6 0 0 1-12 0v-1.5" />
+                          <path d="M12 18.75v3.75" />
+                          <path d="M8.25 22.5h7.5" />
+                        </svg>
+                      )}
+                    </button>
+
+                    <input
+                      ref={draftInputRef}
+                      aria-label="Transcript input"
+                      className="action-composer-input"
+                      placeholder={isSubmitting ? 'Sending...' : inputPlaceholder}
+                      readOnly={isListening || isSubmitting || isStarterTyping}
+                      tabIndex={isLiveMode ? -1 : 0}
+                      type="text"
+                      value={draft}
+                      onChange={handleDraftChange}
+                    />
+
+                    <button
+                      aria-label="Send transcript"
+                      className="action-composer-send"
+                      disabled={isLiveMode || !hasDraft || isListening || isSubmitting || isStarterTyping}
+                      tabIndex={isLiveMode ? -1 : 0}
+                      type="submit"
+                    >
                       <svg
                         aria-hidden="true"
-                        className="action-button-icon action-button-icon--mic"
-                        viewBox="0 0 24 24"
+                        className="action-button-icon action-button-icon--send"
+                        viewBox="0 0 16 16"
                       >
-                        <path d="M12 15.75a3 3 0 0 0 3-3V6a3 3 0 1 0-6 0v6.75a3 3 0 0 0 3 3Z" />
-                        <path d="M18 11.25v1.5a6 6 0 0 1-12 0v-1.5" />
-                        <path d="M12 18.75v3.75" />
-                        <path d="M8.25 22.5h7.5" />
+                        <path d="M3.5 8h8" />
+                        <path d="M8.5 3.5 13 8l-4.5 4.5" />
                       </svg>
-                    )}
-                  </button>
-
-                  <input
-                    ref={draftInputRef}
-                    aria-label="Transcript input"
-                    className="action-composer-input"
-                    placeholder={isSubmitting ? 'Sending...' : inputPlaceholder}
-                    readOnly={isListening || isSubmitting}
-                    type="text"
-                    value={draft}
-                    onChange={handleDraftChange}
-                  />
-
-                  <button
-                    aria-label="Send transcript"
-                    className="action-composer-send"
-                    disabled={!hasDraft || isListening || isSubmitting}
-                    type="submit"
-                  >
-                    <svg
-                      aria-hidden="true"
-                      className="action-button-icon action-button-icon--send"
-                      viewBox="0 0 16 16"
-                    >
-                      <path d="M3.5 8h8" />
-                      <path d="M8.5 3.5 13 8l-4.5 4.5" />
-                    </svg>
-                  </button>
-                </form>
+                    </button>
+                  </form>
+                </div>
 
                 <p
-                  aria-live={speechStatusMessage ? 'polite' : undefined}
-                  className="action-meta"
+                  aria-live={isLiveMode || speechStatusMessage ? 'polite' : undefined}
+                  className={`action-meta${isLiveMode ? ' action-meta--live' : ''}`}
                   role="status"
                 >
-                  {speechStatusMessage
-                    ? renderActionMetaText(speechStatusMessage)
-                    : renderModelAttribution(modelAttributionModelId)}
+                  {isLiveMode
+                    ? livePractice.errorMessage
+                      ? renderActionMetaText(liveHelperText)
+                      : <AnimatedDisclaimer isLive />
+                    : speechStatusMessage
+                      ? renderActionMetaText(speechStatusMessage)
+                      : <AnimatedDisclaimer isLive={false} modelId={modelAttributionModelId} />}
                 </p>
               </div>
             </div>
@@ -1345,9 +2295,9 @@ function App() {
                   <button
                     className="recap-cta-button recap-cta-button--secondary"
                     type="button"
-                    onClick={handlePracticeFromScratch}
+                    onClick={handleEndSession}
                   >
-                    Start from scratch
+                    End session
                   </button>
                   <button className="recap-cta-button recap-cta-button--primary" type="button" onClick={handleRecapModalClose}>
                     Continue practice
@@ -1449,7 +2399,11 @@ function renderInlineQuoteText(text: string): ReactNode[] {
 }
 
 function findLatestAssistantMessage(messages: ConversationState['messages']) {
-  return [...messages].reverse().find((message) => message.speaker !== 'User')
+  return [...messages].reverse().find((message) => message.speaker === 'Cream' || message.speaker === 'Cookie')
+}
+
+function getCallPanelViewKey(view: CallPanelView): string {
+  return `${view.speaker}:${view.role}:${view.showCafeBackdrop ? 'cafe' : 'plain'}`
 }
 
 function renderActionMetaText(text: string): ReactNode[] {
@@ -1473,9 +2427,29 @@ function renderModelAttribution(modelId?: string): ReactNode {
       <a href={amazonBedrockUrl} rel="noreferrer" target="_blank">
         Amazon Bedrock
       </a>
-      {modelId ? ` · ${modelId}` : ''}
+      {' '}for coaching, recap, and translation.
+      {modelId ? ` Model: ${modelId}` : ''}
     </>
   )
+}
+
+function AnimatedDisclaimer(input: { isLive: boolean; modelId?: string }) {
+  if (input.isLive) {
+    return (
+      <>
+        Live voice uses{' '}
+        <a href={amazonNovaUrl} rel="noreferrer" target="_blank">
+          Nova Sonic
+        </a>
+        . Cookie live coaching uses{' '}
+        <a href={amazonBedrockUrl} rel="noreferrer" target="_blank">
+          Amazon Bedrock
+        </a>
+      </>
+    )
+  }
+
+  return <>{renderModelAttribution(input.modelId)}</>
 }
 
 export default App

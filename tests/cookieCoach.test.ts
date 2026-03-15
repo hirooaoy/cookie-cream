@@ -33,4 +33,15 @@ describe('adaptive Cookie coaching', () => {
     expect(reply).toContain('"supermercado"')
     expect(reply).toContain('Hoy fui al supermercado.')
   })
+
+  it('recognizes iced as a common mixed English insert', () => {
+    const reply = createAdaptiveCookieReply({
+      transcript: 'A mí me da un café iced',
+      betterSpanishPhrasing: 'A mí me da un café con hielo.',
+    })
+
+    expect(reply).toContain('"iced"')
+    expect(reply).toContain('"helado"')
+    expect(reply).toContain('A mí me da un café con hielo.')
+  })
 })

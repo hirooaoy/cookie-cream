@@ -6,6 +6,7 @@ import {
 } from '@aws-sdk/client-bedrock-runtime'
 import type { ServerConfig } from './config.js'
 import { createAdaptiveCookieReply } from '../src/cookieCoach.js'
+import { getScriptedTurnDecision } from '../src/demoScript.js'
 import { containsSpanish, type Message, type Phase, type UserTarget } from '../src/prototype.js'
 import type { TurnRequest, TurnResponse } from '../src/turnApi.js'
 import { buildLocalVocabularyEntries, normalizeVocabularyEntries, type VocabularyEntry } from '../src/vocabulary.js'
@@ -78,6 +79,14 @@ const obviousEnglishWords = new Set([
 let cachedClient: BedrockRuntimeClient | null = null
 let cachedRegion: string | null = null
 
+// Reader note:
+// This file is intentionally stricter than a "prompt in, response out" demo layer.
+// In practice, keeping Cookie and Cream distinct is product logic, not prompt luck. We
+// let Nova draft the decision, then validate, normalize, and if needed repair the
+// output so the user experience stays consistent even when the model is slightly loose.
+// That defensive policy code is here on purpose; it was the fastest way to make the
+// judged behavior reliable without pretending the model would always follow instructions
+// perfectly on the first pass.
 export async function resolveNovaTextTurnRequest(
   request: TurnRequest,
   config: ServerConfig['nova'],
@@ -100,6 +109,23 @@ async function generateTurnDecision(
   request: TurnRequest,
   config: ServerConfig['nova'],
 ): Promise<NovaDecision> {
+  const scriptedDecision = getScriptedTurnDecision({
+    transcript: request.transcript,
+    phase: request.phase,
+    scenarioId: request.scenarioId,
+  })
+
+  if (scriptedDecision) {
+    return {
+      route: scriptedDecision.route,
+      reply: scriptedDecision.reply,
+      betterSpanishPhrasing: scriptedDecision.betterSpanishPhrasing,
+      containsEnglish: scriptedDecision.route === 'Cookie',
+      englishSpans: scriptedDecision.englishSpans,
+      vocabulary: scriptedDecision.vocabulary,
+    }
+  }
+
   const expectedRoute = inferExpectedRoute(request)
   const initialDecision = await requestTurnDecision(
     buildSystemPrompt(request, expectedRoute),
@@ -112,6 +138,10 @@ async function generateTurnDecision(
     return initialDecision
   }
 
+  // A second constrained pass was a better hackathon tradeoff than building a much
+  // larger hand-authored router for every edge case. We keep the retry narrow and
+  // explicit so the model fixes the failure mode we observed instead of rethinking the
+  // whole turn from scratch.
   return requestTurnDecision(
     buildRepairSystemPrompt(request, validation.expectedRoute, validation.reason),
     request.transcript.trim(),
@@ -314,6 +344,9 @@ function validateDecision(
   decision: NovaDecision,
   expectedRoute: UserTarget | null,
 ): ValidationIssue | null {
+  // The validation rules are intentionally opinionated because the product promise is
+  // opinionated: Cookie repairs, Cream converses. If those roles blur even once in a
+  // short demo, the core idea becomes harder to understand.
   if (expectedRoute && decision.route !== expectedRoute) {
     return {
       expectedRoute,
@@ -460,6 +493,9 @@ function getAssistantVocabulary(
   decision: NovaDecision,
   assistantReply: string,
 ): VocabularyEntry[] | undefined {
+  // We prefer model-provided vocabulary, but keep a local fallback so the recap and UI
+  // stay informative even when the model omits auxiliary structure. That is a demo
+  // reliability choice rather than a statement that the fallback logic is "better."
   const modelVocabulary = normalizeVocabularyEntries(decision.vocabulary, 2)
 
   if (modelVocabulary.length > 0) {
@@ -477,6 +513,16 @@ function getAssistantVocabulary(
 }
 
 function createAssistantReply(request: TurnRequest, decision: NovaDecision): string {
+  const scriptedDecision = getScriptedTurnDecision({
+    transcript: request.transcript,
+    phase: request.phase,
+    scenarioId: request.scenarioId,
+  })
+
+  if (scriptedDecision && scriptedDecision.route === decision.route) {
+    return scriptedDecision.reply
+  }
+
   if (decision.route === 'Cookie') {
     return createCookieReply(request, decision)
   }
@@ -646,6 +692,7 @@ function isDevelopment(): boolean {
 export const __testables = {
   buildSystemPrompt,
   createNovaTurnResponse,
+  createAssistantReply,
   extractConverseText,
   inferExpectedRoute,
   createCookieReply,

@@ -1,6 +1,6 @@
 import type { SessionRecap } from './recapApi'
 import { containsEnglish, containsSpanish, type Message } from './prototype'
-import { normalizeVocabularyEntries, type VocabularyEntry } from './vocabulary'
+import { buildLocalVocabularyEntries, normalizeVocabularyEntries, type VocabularyEntry } from './vocabulary'
 
 export type SessionRecapPresentation = {
   nextStep: {
@@ -29,7 +29,7 @@ export function buildSessionRecapPresentation(
   return {
     nextStep: buildNextStepPresentation(recap.tryNext, messages),
     summary: buildSummaryLine(messages, stats),
-    vocabulary: buildVocabularyRecap(messages),
+    vocabulary: buildVocabularyRecap(recap, messages),
   }
 }
 
@@ -64,11 +64,60 @@ function buildSummaryLine(messages: Message[], stats: SessionStats): string {
   return `You practiced ${topic} and kept building your answers in Spanish.`
 }
 
-function buildVocabularyRecap(messages: Message[]): VocabularyEntry[] {
+function buildVocabularyRecap(recap: SessionRecap, messages: Message[]): VocabularyEntry[] {
+  const inferredVocabulary = [
+    ...messages
+      .filter((message) => message.speaker === 'Cookie')
+      .flatMap((message) => extractTeachingVocabulary(message.text)),
+    ...extractTeachingVocabulary(recap.betterWay),
+  ]
+
   return normalizeVocabularyEntries(
-    messages.flatMap((message) => message.vocabulary ?? []),
+    [...messages.flatMap((message) => message.vocabulary ?? []), ...inferredVocabulary],
     4,
   )
+}
+
+function extractTeachingVocabulary(text: string): VocabularyEntry[] {
+  return [...extractInlineVocabularyPairs(text), ...buildVocabularyFromTeachingText(text)]
+}
+
+function extractInlineVocabularyPairs(text: string): VocabularyEntry[] {
+  const normalizedText = normalizeWhitespace(text)
+
+  if (!normalizedText) {
+    return []
+  }
+
+  const explicitPair = normalizedText.match(
+    /^["“']?([A-Za-z][A-Za-z' -]{0,20})["”']?\s*(?:=|\bis\b)\s*["“']?([A-Za-zÁÉÍÓÚÜÑáéíóúüñ][A-Za-zÁÉÍÓÚÜÑáéíóúüñ' -]{0,20})["”']?(?=[.?!,]|$)/i,
+  )
+
+  if (!explicitPair) {
+    return []
+  }
+
+  const translation = normalizeWhitespace(explicitPair[1] ?? '')
+  const term = normalizeWhitespace(explicitPair[2] ?? '')
+
+  return translation && term ? [{ term, translation }] : []
+}
+
+function buildVocabularyFromTeachingText(text: string): VocabularyEntry[] {
+  const normalizedText = normalizeWhitespace(text)
+
+  if (!normalizedText) {
+    return []
+  }
+
+  const betterSpanishPhrasing = extractQuotedPhrases(normalizedText).find(isLikelySpanishPhrase)
+
+  return buildLocalVocabularyEntries({
+    transcript: '',
+    betterSpanishPhrasing,
+    reply: normalizedText,
+    maxEntries: 2,
+  })
 }
 
 function buildNextStepPresentation(

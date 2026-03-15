@@ -94,7 +94,7 @@ export function extractSpeechTranscript(
 
   for (let index = event.resultIndex; index < event.results.length; index += 1) {
     const result = event.results[index]
-    const segment = result?.[0]?.transcript.trim() ?? ''
+    const segment = sanitizeRecognizedSegment(result?.[0]?.transcript ?? '')
 
     if (!segment) {
       continue
@@ -112,6 +112,10 @@ export function extractSpeechTranscript(
     interimText,
     transcriptText: [finalizedText, interimText].filter(Boolean).join(' ').trim(),
   }
+}
+
+function sanitizeRecognizedSegment(value: string): string {
+  return value.replace(/,/g, ' ').replace(/\s+/g, ' ').trim()
 }
 
 export function getSpeechRecognitionErrorMessage(error: string): string {

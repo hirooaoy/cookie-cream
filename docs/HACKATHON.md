@@ -2,91 +2,106 @@
 
 ## Category Recommendation
 
-Submit as `Multimodal Understanding`.
+Submit as `Voice AI`.
 
 Reason:
-- the working product combines speech capture, reviewed text, multilingual reasoning, and coaching output
-- the active Nova path today is Nova 2 Lite over reviewed transcript turns, recap, and translation
-- this is a stronger fit than `Voice AI` while live Nova 2 Sonic streaming is not yet the shipped path
+- the primary demo path is a live Amazon Nova 2 Sonic conversation loop
+- the most memorable product moment is a real-time Cookie whisper repair during a live spoken turn
+- assistant replies play back through streamed Sonic audio after the durable turn is committed
+- the earlier reviewed transcript flow remains in the repo as fallback architecture, but live voice is the shipped story
 
 ## Elevator Pitch
 
-Cookie & Cream is a multimodal Spanish conversation coach for English-speaking learners. Cream keeps the conversation moving in Spanish, and Cookie steps in only when the learner slips into English so they can recover without losing the thread.
+Cookie & Cream is a real-time conversational recovery coach for English-speaking Spanish learners. Cream keeps the conversation moving in Spanish, and Cookie appears only when the learner slips into English so they can recover inside the moment instead of freezing.
 
 ## Submission Angle
 
-Frame the project around this problem:
+Frame the problem like this:
 
-- language learners often freeze when they switch languages mid-sentence
-- most tools correct them after the fact instead of helping them recover inside the conversation
+- language learners do not fail after the sentence, they fail in the middle of it
+- most tools correct them after the fact instead of helping them recover while the conversation is still alive
 
 Frame the solution like this:
 
-- the learner speaks or types
-- the app creates a reviewed transcript
-- Amazon Nova decides whether Cookie or Cream should respond
-- Cookie gives one better Spanish phrasing when needed
-- Cream continues the conversation naturally in Spanish
+- the learner speaks into a live Nova 2 Sonic session
+- the current utterance appears immediately in the helper area
+- if the learner slips into English, Cookie whispers one short Spanish repair
+- once the turn is clean, the transcript is submitted through the durable `/api/turn` path
+- Cream or Cookie responds in text, and the live path streams Sonic assistant audio back to the browser
+- the session can end with a short recap and optional translation support
 
 ## Short Submission Blurb
 
-Cookie & Cream helps English-speaking intermediate Spanish learners practice real conversation without breaking the flow when they slip into English. The learner can speak or type, review the transcript, and send the turn. Amazon Nova routes the turn to either Cream, the Spanish conversation partner, or Cookie, the English-speaking coach who gives one better Spanish phrasing and asks for a retry. The session can finish with a short recap and on-demand translation of agent messages.
+Cookie & Cream is a Voice AI conversation coach for English-speaking intermediate Spanish learners. The live demo streams microphone audio into Amazon Nova 2 Sonic, renders the current utterance in real time, and shows a brief Cookie whisper when the learner slips into English mid-sentence. Once the learner retries in Spanish, the durable turn is submitted through `/api/turn`, Cream continues the conversation naturally, and the assistant reply plays back through streamed Sonic audio. The session can finish with a short recap and on-demand translation of Cream messages.
 
 ## Key Features
 
-- Two-agent handoff: Cream continues the Spanish conversation while Cookie handles recovery after an English slip.
-- Reviewed transcript flow: the learner can speak, edit, and submit the transcript before the model responds.
-- Session recap: the app generates three wins, one better phrasing, and one next step from the current conversation.
-- On-demand translation: the learner can translate Cookie or Cream messages into English when needed.
+- Live Nova 2 Sonic transcript loop over WebSocket.
+- Real-time Cookie whisper repair when the learner mixes in English.
+- Durable turn routing and reply generation through `/api/turn`.
+- Streamed Nova Sonic assistant audio playback for live-mode responses.
+- Session recap and on-demand translation powered by Amazon Nova.
+- Reviewed transcript fallback architecture retained in the repo.
 
 ## Why Judges May Care
 
-- The Cookie and Cream handoff creates a clearer learning loop than a generic chatbot tutor.
-- The product focuses on recovery after mistakes, which is a real pain point in language practice.
-- The current repo is honest, testable, and easy to understand in a short demo.
+- The product is voice-first and category-native instead of being a text tutor with voice bolted on.
+- The Cookie and Cream handoff creates a memorable two-agent learning loop.
+- The app solves a specific failure point: recovering mid-sentence instead of restarting after the conversation breaks.
+- The repo now explains the live path, fallback path, and Amazon Nova usage quickly enough for async judging.
 
 ## What The Repo Actually Does Today
 
 Implemented now:
-- browser speech capture with editable transcript
-- backend turn submission through `/api/turn`
-- backend session recap through `/api/recap`
-- backend translation through `/api/translate`
-- Nova 2 Lite as the active backend model path
-- local fallback turn, recap, and translation logic
+- live mode powered by Nova 2 Sonic streaming speech over `/api/live`
+- helper-area rendering of the current live utterance
+- ephemeral Cookie whisper hints during an English slip
+- auto-submit gating after a final transcript plus pause when no unresolved slip remains
+- durable turn submission through `/api/turn`
+- streamed Sonic assistant playback through `/api/assistant-audio`
+- session recap generation through `/api/recap`
+- on-demand translation through `/api/translate`
+- local fallback logic if backend requests fail
+- reviewed transcript fallback path retained in the repo
 - scenario starters: Introduce yourself, Cafe order, Finding restaurant
 
-This means the repo can honestly demo:
-- a normal Spanish conversation turn
-- an English or mixed-language slip
-- Cookie coaching in English
-- a Spanish retry
-- Cream continuation in Spanish
-- a short recap at the end of the session
-- optional translation of agent messages for the learner
+## Manual Test Path
+
+Use this as the demo and judge-testing path:
+
+1. Start the app with AWS credentials available through env vars, a shared profile, or an attached role.
+2. Open the frontend, allow microphone access, and click `Start Live Practice`.
+3. Choose `Cafe order`.
+4. Tap the mic, speak a full Spanish turn, and verify the helper area shows the live transcript before Cream responds.
+5. Speak a mixed Spanish and English turn and verify Cookie whispers a short repair.
+6. Retry in Spanish and verify the durable turn is submitted only after the repaired utterance is clean.
+7. Confirm the assistant reply plays back through Sonic audio, with browser speech synthesis as fallback.
+8. Request a session recap and translate a Cream message.
 
 ## Proof Points
 
 Current local validation:
-- `npm test` passes with `36` tests
+- `npm test` passes with `72` tests
 - `npm run build` passes
 - `npm run eval:routes` passes `80/80` route checks on the Nova path
+
+## Honest Model Story
+
+Primary live model path:
+- `/api/live` uses Nova 2 Sonic for live speech transcription
+- live whisper analysis uses Amazon Nova on Bedrock and returns ephemeral whisper events
+- `/api/assistant-audio` uses Nova 2 Sonic for live assistant playback
+- `/api/turn` uses Nova 2 Lite for durable turn routing and text generation
+- `/api/recap` uses Nova 2 Lite for session recap generation
+- `/api/translate` uses Nova 2 Lite for on-demand translation
+
+Fallback behavior:
+- if the backend Nova path fails, the app falls back to local logic so the demo stays testable
+- the earlier reviewed transcript flow remains the fallback implementation in the repo
 
 ## What Is Intentionally Out Of Scope Today
 
 Not built yet:
-- live Nova 2 Sonic voice streaming in the active user path
-- production-grade speech recognition
-- persistent history or database-backed sessions
-- polished multi-session learning analytics
-
-## Honest Model Story
-
-Current active model path:
-- reviewed transcript turns use Nova 2 Lite on the backend
-- session recap uses Nova 2 Lite on the backend
-- on-demand translation uses Nova 2 Lite on the backend
-
-Future model path:
-- live spoken interaction can move to Nova 2 Sonic when the app supports real backend audio sessions
-- the repo already contains an experimental Sonic-oriented server path, but it is not the default user flow today
+- persistent storage or multi-session history
+- a broader always-on full-duplex production voice stack
+- polished multi-session progress analytics

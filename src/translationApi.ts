@@ -1,6 +1,6 @@
 import { containsEnglish, containsSpanish, type Speaker } from './prototype.js'
 
-export type AgentSpeaker = Exclude<Speaker, 'User'>
+export type AgentSpeaker = Exclude<Speaker, 'User' | 'System'>
 
 export type TranslationRequest = {
   text: string

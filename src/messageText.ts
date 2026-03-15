@@ -19,6 +19,16 @@ export function getBubbleTextSegments(
   return [{ isEnglish: false, text: message.text }]
 }
 
+export function getSpeechTextSegments(
+  message: Pick<Message, 'speaker' | 'text'>,
+): MessageTextSegment[] {
+  if (message.speaker === 'Cookie') {
+    return mergeAdjacentSegments(splitCookieSpeechSegments(message.text))
+  }
+
+  return [{ isEnglish: false, text: message.text }]
+}
+
 export function getInlineQuoteTextSegments(text: string): MessageTextSegment[] {
   return splitEnglishTokenSegments(text)
 }
@@ -52,6 +62,48 @@ function splitQuotedEnglishSegments(text: string): MessageTextSegment[] {
       { isEnglish: false, text: '"' },
     ]
   })
+}
+
+function splitCookieSpeechSegments(text: string): MessageTextSegment[] {
+  return text.split(/(".*?")/g).flatMap((part) => {
+    if (!part) {
+      return []
+    }
+
+    if (!/^".*"$/.test(part)) {
+      return [{ isEnglish: true, text: part }]
+    }
+
+    const quotedText = part.slice(1, -1)
+
+    if (!quotedText.trim()) {
+      return [{ isEnglish: true, text: part }]
+    }
+
+    if (containsSpanish(quotedText) && !containsEnglish(quotedText)) {
+      return [{ isEnglish: false, text: part }]
+    }
+
+    return [{ isEnglish: isEnglishPhrase(quotedText) || !containsSpanish(quotedText), text: part }]
+  })
+}
+
+function mergeAdjacentSegments(segments: MessageTextSegment[]): MessageTextSegment[] {
+  return segments.reduce<MessageTextSegment[]>((mergedSegments, segment) => {
+    if (!segment.text) {
+      return mergedSegments
+    }
+
+    const previousSegment = mergedSegments[mergedSegments.length - 1]
+
+    if (previousSegment && previousSegment.isEnglish === segment.isEnglish) {
+      previousSegment.text += segment.text
+      return mergedSegments
+    }
+
+    mergedSegments.push({ ...segment })
+    return mergedSegments
+  }, [])
 }
 
 function isEnglishPhrase(text: string): boolean {

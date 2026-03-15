@@ -5,6 +5,7 @@ export type VocabularyEntry = {
 
 const fallbackVocabularyGlossary: Record<string, string> = {
   agua: 'water',
+  agregar: 'to add',
   amigo: 'friend',
   amigos: 'friends',
   autobus: 'bus',
@@ -24,6 +25,8 @@ const fallbackVocabularyGlossary: Record<string, string> = {
   hace: 'it is',
   hice: 'I did',
   hiciste: 'you did',
+  helado: 'iced',
+  hielo: 'ice',
   hola: 'hello',
   hoy: 'today',
   leche: 'milk',
@@ -38,6 +41,7 @@ const fallbackVocabularyGlossary: Record<string, string> = {
   perdi: 'I missed',
   quiero: 'I want',
   restaurante: 'restaurant',
+  sandwich: 'sandwich',
   sentarme: 'to sit down',
   supermercado: 'grocery store',
   tambien: 'also',
