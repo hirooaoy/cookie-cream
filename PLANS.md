@@ -1,61 +1,106 @@
 # Cookie & Cream Plans
 
+This file is the forward-looking roadmap. For the current checked-in state, read `README.md` and `STATUS.md` first.
+
 ## Snapshot
 
 Product direction:
 - Voice-first Spanish conversation coach for English-speaking intermediate learners
 - Category target: Voice AI
-- Core model target: Amazon Nova 2 Sonic
+- Core live model target: Amazon Nova 2 Sonic
 
 Current repo reality:
-- Frontend-only Vite + React + TypeScript prototype
-- Voice-first dock with editable transcript in the browser
-- Browser speech recognition via the Web Speech API
-- Local turn logic in `src/prototype.ts`
-- No backend, no database, no Nova 2 Sonic in the core turn path
-- Current fallback copy and routing examples are still Japanese/English, not yet Spanish-focused
+- Vite + React + TypeScript frontend
+- Node + TypeScript backend in `server/`
+- Live Nova 2 Sonic path is the primary demo flow
+- Nova 2 Lite handles durable turn routing, recap, and translation
+- Reviewed transcript fallback remains in the repo as a backup path
+- No persistent storage or multi-session history yet
 
 ## Current Status
 
 Done:
-- Minimal single-screen app scaffold
-- Conversation transcript UI
-- Cookie/Cream avatars and chat layout
-- Editable transcript input
-- Browser speech capture
-- Local submit path into `submitUserTurn(...)`
-- Local Cookie/Cream fallback behavior
+- Live voice-first practice flow
+- Browser mic capture streamed to `/api/live`
+- Live Nova 2 Sonic transcript rendering
+- Ephemeral Cookie whisper hints for English slips
+- Durable turn submission through `/api/turn`
+- Nova 2 Lite Cookie/Cream routing and reply generation
+- Nova Sonic assistant audio playback path
+- Recap and translation endpoints
+- Local fallback behavior when backend or model calls fail
 
 Not done:
-- Spanish retarget of the local fallback logic and copy
-- Backend session/service layer
-- Nova 2 Sonic in the primary speech turn path
-- Production speech stack beyond browser Web Speech API
-- Submission assets and polished demo flow
+- Persistent storage or multi-session history
+- Full production-grade always-on duplex voice handling
+- Broader analytics and learner progress tracking
+- Cleanup of the largest orchestration files
+- More end-to-end coverage around the full live loop
 
 ## Milestones
 
-### Milestone 0: Current Prototype Baseline
+### Milestone 0: Live Demo Baseline
 Status: Done
 
 Scope:
-- Preserve the current browser-only prototype
-- Keep local turn logic as a fallback baseline
+- Preserve the current live whisper-recovery demo
+- Keep backend and local fallback paths working
 
 Validation:
 ```bash
 npm install
+nvm use
 npm run build
-npm run dev
+npm test
+npm run eval:routes
 ```
 
-### Milestone 1: Spanish Retarget
+### Milestone 1: Live Loop Hardening
 Status: Remaining
 
 Scope:
-- Replace Japanese-first fallback logic and demo copy with Spanish-first content
-- Keep the same Cookie/Cream interaction model
-- Keep local fallback logic for development until Nova is wired in
+- Reduce risk in the live transcript -> whisper -> submit -> playback loop
+- Improve cross-browser microphone and assistant audio recovery
+- Add stronger integration coverage around the timing-sensitive path
+
+Validation:
+```bash
+npm test
+npm run build
+```
+
+Manual checks:
+- Live transcript appears while speaking
+- English slips trigger Cookie whispers
+- Clean Spanish retry auto-submits correctly
+- Assistant audio still plays back or falls back cleanly
+
+### Milestone 2: Targeted Refactor
+Status: Remaining
+
+Scope:
+- Extract smaller modules from the biggest orchestration files
+- Keep visible behavior unchanged while improving readability
+- Preserve current fallback and validation behavior
+
+Validation:
+```bash
+npm test
+npm run build
+```
+
+Manual checks:
+- Whisper timing and clearing still feel correct
+- Cookie and Cream remain sharply separated
+- Playback state does not regress during refactors
+
+### Milestone 3: Persistence Decision
+Status: Remaining
+
+Scope:
+- Decide whether to keep this as a stateless demo or add session persistence
+- If persistence is added, introduce minimal storage for history and recap continuity
+- Keep the core demo path simple and fast
 
 Validation:
 ```bash
@@ -63,62 +108,18 @@ npm run build
 ```
 
 Manual checks:
-- Typed Spanish stays with Cream
-- English fallback triggers Cookie
-- Retry in Spanish returns to Cream
-- Voice transcript can still be edited before send
-
-### Milestone 2: Nova 2 Sonic in the Core Turn Path
-Status: Remaining
-
-Scope:
-- Add a backend service for turn handling
-- Put Amazon Nova 2 Sonic on the primary speech path
-- Move the live conversation turn out of browser-only heuristics
-- Keep local fallback logic as a dev/demo safety net
-
-Validation:
-```bash
-npm run build
-```
-
-Backend validation target:
-```bash
-# exact command TBD once backend exists
-```
-
-Manual checks:
-- Spoken input reaches the backend
-- Nova 2 Sonic is used for the main turn path
-- Cookie/Cream routing still matches product rules
-
-### Milestone 3: Demo Hardening
-Status: Remaining
-
-Scope:
-- Clean up copy, screenshots, and demo script
-- Prepare submission narrative around Voice AI + Nova 2 Sonic
-- Add error handling and fallback behavior for unsupported speech browsers
-
-Validation:
-```bash
-npm run build
-```
-
-Manual checks:
-- 3-minute demo can be run without code edits
-- Screenshots match the current product story
-- Repo instructions are accurate
+- Session continuity matches the chosen scope
+- Recaps remain coherent after persistence changes
 
 ## Recommended Order
 
-1. Retarget the local prototype from Japanese to Spanish
-2. Add the backend turn service
-3. Put Nova 2 Sonic into the core turn path
-4. Harden the demo and submission materials
+1. Harden the live loop
+2. Refactor the highest-risk orchestration files carefully
+3. Decide on persistence
+4. Expand polish only after the main loop stays stable
 
 ## Notes
 
-- The repo already demonstrates the interaction pattern and the voice-first UI.
-- The main compliance gap is that the core turn path is still local/browser-driven rather than Nova 2 Sonic-driven.
-- The biggest narrative gap is that the repo implementation still contains Japanese-specific fallback logic while the project direction is now Spanish.
+- The repo already demonstrates the live interaction pattern honestly.
+- The biggest engineering risk is behavioral regression in the timing-sensitive live loop.
+- `docs/ARCHITECTURE.md` and `docs/ENGINEERING_NOTES.md` explain why some logic is intentionally concentrated today.

@@ -10,7 +10,7 @@ The main demo is live and voice-first: microphone audio streams into Amazon Nova
 - Golden path: speak -> live Nova 2 Sonic transcript -> English slip -> Cookie whisper -> Spanish retry -> Cream continues -> recap.
 - Novel mechanic: a two-agent whisper recovery loop instead of a tutor that interrupts the whole conversation or corrects you after the moment has already passed.
 - Amazon Nova: Nova 2 Sonic handles live speech and assistant playback. Nova 2 Lite handles turn routing, recap, and translation.
-- Proof: `npm test` passes with `72` tests, `npm run build` passes, and `npm run eval:routes` passes `80/80` route checks on the Nova path.
+- Proof: `npm test` passes with `92` tests, `npm run build` passes, and `npm run eval:routes` passes `80/80` route checks on the Nova path.
 
 ## Problem
 
@@ -108,19 +108,44 @@ Agent message
 
 Current validation:
 
-- `npm test` passes with `72` tests
+- `npm test` passes with `92` tests
 - `npm run build` passes
 - `npm run eval:routes` passes `80/80` route checks on the Nova path
 
 ## Run Locally
 
 ```bash
+nvm use
 cp .env.example .env
 npm install
 npm run dev:full
 ```
 
 Then open the frontend shown by Vite. The backend API runs on port `8787` by default. AWS credentials can come from env vars, a shared profile, or an attached role.
+
+If you do not use `nvm`, install Node `20.20.0`.
+
+## Continue On Another Computer
+
+GitHub carries the tracked repo state, but not local secrets or machine setup. To resume quickly on another computer:
+
+```bash
+git clone https://github.com/hirooaoy/cookie-cream.git
+cd cookie-cream
+nvm use
+cp .env.example .env
+npm install
+npm run dev:full
+```
+
+Move `.env` or AWS credentials separately because they are intentionally not committed.
+
+If you want a new Codex session to pick up context fast, have it read:
+
+- `AGENTS.md`
+- `STATUS.md`
+- `docs/ARCHITECTURE.md`
+- `docs/ENGINEERING_NOTES.md`
 
 ## Manual Smoke Test
 
